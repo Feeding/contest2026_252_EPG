@@ -1,0 +1,104 @@
+/****************************************************************************
+ * board/contest_board/chip/bk7258_clockconfig.c
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.  The
+ * ASF licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the
+ * License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ * Included Files
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#include <stdint.h>
+
+#include "arm_internal.h"
+#include "bk7258_clockconfig.h"
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_uart_clockenable
+ ****************************************************************************/
+
+void bk7258_uart_clockenable(int uart)
+{
+  uint32_t divsel;
+  uint32_t cken;
+  uint32_t regval;
+
+  switch (uart)
+    {
+      case 0:
+        divsel = SYS_CLKDIV_UART0_MASK | SYS_CLKSEL_UART0;
+        cken   = SYS_CKEN_UART0;
+        break;
+
+      case 1:
+        divsel = SYS_CLKDIV_UART1_MASK | SYS_CLKSEL_UART1;
+        cken   = SYS_CKEN_UART1;
+        break;
+
+      case 2:
+        divsel = SYS_CLKDIV_UART2_MASK | SYS_CLKSEL_UART2;
+        cken   = SYS_CKEN_UART2;
+        break;
+
+      default:
+        return;
+    }
+
+  /* Source the UART from the 26MHz crystal with no further division, which
+   * is the clock BK7258_UART_CLOCK assumes when computing the baud divisor.
+   * Clearing both the divider and the select bit selects XTAL/1.
+   */
+
+  regval  = getreg32(BK7258_SYS_CPU_CLKDIV_MODE1);
+  regval &= ~divsel;
+  putreg32(regval, BK7258_SYS_CPU_CLKDIV_MODE1);
+
+  /* Ungate the module clock. */
+
+  regval  = getreg32(BK7258_SYS_CPU_DEVICE_CKEN);
+  regval |= cken;
+  putreg32(regval, BK7258_SYS_CPU_DEVICE_CKEN);
+}
+
+/****************************************************************************
+ * Name: bk7258_clockconfig
+ ****************************************************************************/
+
+void bk7258_clockconfig(void)
+{
+  /* The core clock, flash controller and PSRAM are already running by the
+   * time we get here: the boot ROM and the Beken second-stage bootloader
+   * must configure them in order to fetch this image over XIP.  Enabling
+   * the clocks for the UARTs we actually use is all that is needed.
+   */
+
+#ifdef CONFIG_BK7258_UART0
+  bk7258_uart_clockenable(0);
+#endif
+#ifdef CONFIG_BK7258_UART1
+  bk7258_uart_clockenable(1);
+#endif
+#ifdef CONFIG_BK7258_UART2
+  bk7258_uart_clockenable(2);
+#endif
+}

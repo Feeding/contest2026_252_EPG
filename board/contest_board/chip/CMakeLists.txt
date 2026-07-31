@@ -1,8 +1,7 @@
 # ##############################################################################
-# board/contest_board/src/CMakeLists.txt
+# board/contest_board/chip/CMakeLists.txt
 #
-# The "board" library target is created by nuttx/boards; we only add sources
-# to it.
+# BK7258 chip layer for openvela / NuttX.
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more contributor
 # license agreements.  See the NOTICE file distributed with this work for
@@ -21,12 +20,11 @@
 #
 # ##############################################################################
 
-set(SRCS bk7258_boardinit.c)
+set(SRCS bk7258_start.c bk7258_irq.c bk7258_lowputc.c bk7258_allocateheap.c
+         bk7258_gpio.c bk7258_clockconfig.c bk7258_timerisr.c)
 
-if(CONFIG_BOARDCTL)
-  list(APPEND SRCS bk7258_appinit.c)
+if(CONFIG_BK7258_UART0 OR CONFIG_BK7258_UART1 OR CONFIG_BK7258_UART2)
+  list(APPEND SRCS bk7258_serial.c)
 endif()
 
-target_sources(board PRIVATE ${SRCS})
-
-target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR})
+target_sources(arch PRIVATE ${SRCS})

@@ -1,36 +1,63 @@
-# contest2026_252_EPG
+# openvela on BK7258 —— 声网对话式 AI 开发套件 R1 板级适配
 
-👋 欢迎参加 **2026 首届 openvela AI 硬件开发者大赛**！
+## 一、作品简介
 
-这是组委会为你的队伍创建的**专属参赛仓库**（本仓为样例/模板，队伍编号 `252`；你看到的将是你自己的 `contest2026_<编号>_<队伍名>`）。比赛期间，你的全部参赛代码、打包产物与 AI Coding 日志都提交到这里。
+把 **openvela / NuttX 移植到博通集成（Beken）BK7258** 上，目标硬件是**声网对话式
+AI 开发套件 R1（Agora ConvoAI Kit R1）**。BK7258 此前在 openvela 生态中没有任何
+支持——`vendor/beken` 是个只有 CI 模板的空仓，`nuttx/arch` 与 `nuttx/boards` 下也
+没有相关代码。本作品从零补齐了芯片层（BSP）、板级层、构建集成与烧录镜像打包链路。
 
-> 本仓既是「代码仓」，又内置了一键拉取整套 openvela 工程的 `repo` 清单（manifest）。你只需跟它打交道，**自始至终只动一个文件夹**。
+亮点：
 
----
+- **公共仓零改动。** 全部代码在参赛仓内，通过 `CONFIG_ARCH_CHIP_CUSTOM_DIR` /
+  `CONFIG_ARCH_BOARD_CUSTOM_DIR` 挂进 openvela 构建树，`nuttx/`、`packages/`、
+  `vendor/` 一行未改，完全符合参赛提交规范。
+- **寄存器级事实全部有据可查。** 内存映射、60 个中断号、UART 寄存器位域、时钟门控
+  位、引脚复用值，逐项来自 BK7258 Datasheet V2.1 与 Beken `bk_idk` SDK 源码，
+  README 中标注了出处。
+- **反推并验证了 Beken flash 的 CRC 编码格式。** BK7258 的 flash 控制器在 XIP 取指
+  时做 CRC 校验（每 32 字节插 2 字节 CRC，物理:虚拟 = 34:32）。厂商的 CRC 工具只有
+  Linux 版，我们对 SDK 中随附的已编码镜像做参数穷举，定出算法（MSB-first，多项式
+  `0x8005`，初值 `0xFFFF`，大端存储），并在 3 个样本共 **3868 个块上逐块复算，零
+  失配**，据此实现了跨平台的 Python 打包工具。
+- **在 macOS（Apple Silicon）上打通了完整构建链路。**
 
-## 一、先读这些官方文档
+## 二、选题方向
 
-**通用（所有赛道必读）：**
+**新硬件适配**。BK7258 是国产 Armv8-M（STAR-MC1）三核 AMP 架构的 Wi-Fi 6 + BLE 5.4
+多媒体 SoC，openvela 尚未支持，符合该赛道"选择尚未适配的硬件平台"的要求，且属于
+评分说明中鼓励的"国产芯片平台"方向。
 
-| 文档                                                                                                                                     | 用途                                           |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| [《大赛总览》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/contest_overview.md)                        | 赛道、流程、评分、资源，建议先通读             |
-| [《参赛代码提交指南》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/code_submission_guide.md)           | 仓库获取、提交流程、时间与权限（**以此为准**） |
-| [《AI Coding 日志归集与提交手册》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_coding_log_guide.md) | 如何导出 AI 对话日志并提交到 `logs/`           |
+## 三、目录结构
 
-**按你的赛道选读（三选一）：**
+```
+board/contest_board/          板级适配代码（→ vendor/openvela/boards/contest2026_252_board）
+├── chip/                     BK7258 芯片层（CONFIG_ARCH_CHIP_CUSTOM_DIR）
+│   ├── bk7258_start.c        复位入口：VTOR / FPU / .data / .bss → nx_start()
+│   ├── bk7258_irq.c          NVIC 中断控制（60 个外设中断）
+│   ├── bk7258_timerisr.c     SysTick 系统节拍
+│   ├── bk7258_serial.c       UART 字符设备驱动（/dev/console, /dev/ttyS0）
+│   ├── bk7258_lowputc.c      早期调试输出与 UART 线路配置
+│   ├── bk7258_clockconfig.c  外设时钟门控与时钟源选择
+│   ├── bk7258_gpio.c         GPIO 与引脚复用
+│   ├── bk7258_allocateheap.c 堆区划分
+│   ├── bk7258_memorymap.h    内存映射与外设基址
+│   ├── bk7258_uart.h         UART 寄存器定义
+│   └── include/irq.h         中断号定义
+├── src/                      板级初始化
+├── include/board.h           时钟与引脚约定
+├── scripts/ld.script         链接脚本（含 XIP 地址推导过程）
+├── configs/nsh/defconfig     最小 NSH 基线配置
+├── tools/bk_crc_pack.py      flash CRC 编码 / 校验
+├── tools/bk_flash.py         烧录器（持续等待复位窗口，免抢时机）
+└── README.md                 详细技术文档（硬件事实表、flash 布局、烧录说明）
 
-| 赛道                  | 教程导航                                                                                                                                                 |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 快应用 / 手表应用创新 | [快应用教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/quickapp/quickapp_guide_index.md)                         |
-| AI 硬件产品创新       | [AI 硬件赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_hardware/ai_hardware_guide_index.md)              |
-| 新硬件适配            | [新硬件适配赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/hardware_porting/hardware_porting_guide_index.md) |
+logs/                         AI Coding 日志
+```
 
----
+## 四、运行方式
 
-## 二、第一步：拉取完整工程
-
-用组委会提供的命令一键拉取「openvela 全量源码 + 你的专属仓」：
+### 1. 拉取工程
 
 ```bash
 repo init -u https://github.com/open-vela/contest2026_252_EPG \
@@ -38,111 +65,102 @@ repo init -u https://github.com/open-vela/contest2026_252_EPG \
 repo sync -c -j8
 ```
 
-同步后，你的整个仓库位于工作区的 `contest2026_252_EPG/`，openvela 全量源码在外层（`nuttx/`、`apps/`、`packages/`、`vendor/` 等）。
+manifest 中的 `<linkfile>` 会把 `board/contest_board` 软链到
+`vendor/openvela/boards/contest2026_252_board`。
 
----
+### 2. 编译
 
-## 三、第二步：在哪里写代码
-
-**只在自己的仓目录 `contest2026_252_EPG/` 里开发。** 不同作品形态放在对应子目录，manifest 会通过 `<linkfile>` 把它们**软链**到 openvela 编译树该在的位置——你不用手动 copy：
-
-| 作品形态 | 你的代码放这里             | 系统自动映射到                                 |
-| -------- | -------------------------- | ---------------------------------------------- |
-| 应用     | `app/hello_app/`           | `packages/demos/contest2026_252_hello_app`     |
-| 快应用   | `quickapp/hello_quickapp/` | `packages/apps/contest2026_252_hello_quickapp` |
-| 板级适配 | `board/contest_board/`     | `vendor/openvela/boards/contest2026_252_board` |
-
-> 用不到的形态目录可以删掉；新增作品时按同样规则加子目录，并在 `contest2026_252_EPG.xml` 里补一条 `<linkfile>` 映射即可。**生产仓库（packages/nuttx/vendor 等）零改动。**
-
-建议仓库目录约定（便于评委定位）：
-
-```text
-app/ | quickapp/ | board/   # 你的作品代码
-logs/                       # AI Coding 日志（主动导出后提交，格式见 logs/README.md）
-README.md                   # 作品说明（提交前请改成你自己的，见第六节）
-```
-
-> 仓内附带了一个 `.gitignore.example`，给出了**编译产物**等不需要进仓的文件示例。如需启用，`cp .gitignore.example .gitignore` 后按需增删即可。**注意 `logs/` 下最终导出的 AI Coding 日志必须提交，不要忽略。**
->
-> `logs/` 的目录结构与提交格式见 [logs/README.md](logs/README.md)。
-
----
-
-## 四、第三步：编译与运行
-
-编译/运行步骤随作品形态不同而不同，请参考你所在赛道的教程导航：
-
-- 快应用 / 手表应用：[快应用教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/quickapp/quickapp_guide_index.md)（含模拟器与开发板部署）。
-- AI 硬件产品创新：[AI 硬件赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_hardware/ai_hardware_guide_index.md)（环境搭建、编译烧录、Skill 开发）。
-- 新硬件适配：[新硬件适配赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/hardware_porting/hardware_porting_guide_index.md)（BSP 移植、最小 NSH 基线）。
-
-子目录已通过 manifest 中的 `<linkfile>` 软链进 openvela 编译树，因此构建在 openvela 工作区**根目录**（即你这个仓的上一级）进行。openvela 使用 `build.sh` 作为统一入口，接收一个 **board config 路径**作为参数：
+在 openvela 工作区根目录（本仓上一级）：
 
 ```bash
-# 进入 openvela 工作区根目录（你的仓的上一级）
-cd ..
-
-# 通用语法：第一个参数是 board config 路径，第二个参数可以是 menuconfig / distclean 等
-./build.sh <board-config-path> [menuconfig|distclean] [-j8]
+./build.sh vendor/openvela/boards/contest2026_252_board/configs/nsh --cmake -j8
 ```
 
-> 具体的 board config 路径、目标产物、模拟器/真机部署方式请以你所在赛道的教程导航为准。本仓 `app/` `quickapp/` `board/` 三个示例骨架对应的 Kconfig 选项可通过 `menuconfig` 启用。
+产物：`cmake_out/contest2026_252_board_nsh/nuttx.bin`。
 
----
+### 3. 生成可烧录镜像
 
-## 五、第四步：提交作品
-
-1. **fork** 你的专属仓 → 开发 → `git commit` 并推送 → 向专属仓发起 **Pull Request**，可**自行 review 并合入**（无需等组委会）。
-2. **AI Coding 日志**：与 AI 工具的对话会自动记录到本机 staging（不会自动上传），需你**主动导出/打包**选定会话到仓内 `logs/` 目录后一并提交。详见[《AI Coding 日志归集与提交手册》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_coding_log_guide.md)。
-3. 若需改动 **nuttx 等公共仓库**，不在本仓改，而是 fork 对应公共仓、以 PR 提交到 `dev-ai-contest-2026` 分支，由组委会 review 后合入。
-
-> ⏰ **提交作品截止：9 月 20 日**。截止后统一收回 push 权限，仍可查看 / clone。
->
-> 获奖后再按要求将作品 PR 至 openvela 上游对应仓库（走标准 PR + CI 流程）。
-
-### 关于 PR 与 CLA
-
-- 本仓所有改动通过 **Pull Request** 合入（分支保护强制，可自行合入自己的 PR）。
-- 首次贡献需在[**官网签署 CLA**](https://openvela.com/#/community/cla)；PR 上会自动跑 `cla/signature` 检查，在官网签署成功后，在 PR 评论 `/check-cla` 复检即可通过。
-
----
-
-## 六、提交前：把本 README 改成你的作品说明
-
-本文件目前是组委会给的**使用说明书**。**作品提交前，请把它替换成你自己作品的说明**，方便评委快速了解你做了什么、怎么跑起来。建议至少包含以下内容：
-
-```markdown
-# <你的作品名>
-
-## 一、作品简介
-<一句话/一段话说明这个作品是什么、解决什么问题、亮点在哪>
-
-## 二、选题方向
-<快应用 / 手表应用创新 ｜ AI 硬件产品创新 ｜ 新硬件适配 ｜ 自定方向，并简述理由>
-
-## 三、目录结构
-<列出你这个仓里各目录/文件的作用，例如：>
-- `app/xxx/`        — <说明>
-- `board/xxx/`      — <说明>
-- `quickapp/xxx/`   — <说明>
-- `logs/`           — AI Coding 日志
-- `docs/` 或其他    — <说明>
-
-## 四、运行方式
-<拉取工程后，如何编译、烧录/部署、运行的完整步骤；最好能让评委照着一步步复现>
-
-## 五、AI Coding 使用说明
-<说明本作品如何借助 AI 辅助开发：
-- 在需求拆解 / 方案设计 / 编码 / 调试 / 文档等环节如何与 AI 协作；
-- AI 对开发效率或质量带来的实际帮助。
-完整对话日志见 logs/ 目录>
+```bash
+python3 contest2026_252_EPG/board/contest_board/tools/bk_crc_pack.py \
+    cmake_out/contest2026_252_board_nsh/nuttx.bin nuttx_crc.bin
 ```
 
-> 提示：将会根据「作品本身 + 你的 README 说明 + `logs/` 里的 AI Coding 日志」来理解和评估你的作品，README 写清楚很重要。
+### 4. 烧录
 
----
+```bash
+python3 contest2026_252_EPG/board/contest_board/tools/bk_flash.py \
+    nuttx_crc.bin 0x11000
+```
 
-## 附：仓库命名规范
+脚本启动后按一次板子右侧 `RST` 键即可，它会自动完成握手、擦写和回读校验。
 
-`contest2026_<编号>_<队伍名>` — 编号三位零填充；队名 slug（全小写、英文/拼音、连字符）。例：`contest2026_252_EPG`。
-（仓库由组委会统一创建，**每队仅一个仓**，无需自行命名。）
+之所以自带烧录器而不直接用官方 `bk_loader`：本板的 CH340 控制线没有接到芯片的
+CEN 复位脚，官方工具无法自动复位，而它的等待窗口固定约 10 秒，只能靠盲按 RST 去
+撞——实测连续 35 轮未命中。本脚本不设超时，任意一次复位都会被捕获。细节见
+[board/contest_board/README.md](board/contest_board/README.md) 第八节。
+
+Type-C 线接开发板 `USB TO UART` 口；板载 CH340 接到 UART0（GPIO10/GPIO11），
+控制台 **115200 8N1**。
+
+> ⚠️ **务必先备份再烧录。** 烧录会覆盖出厂的声网 AI Demo 固件，而一旦烧入不能
+> 启动的镜像，板子将不再提供任何串口响应，只能靠上述持续等待重新接管。备份用
+> 官方 `bk_loader read` 或 BKFIL 完整读回 8MB 即可。
+
+## 五、当前进度
+
+| 阶段 | 状态 |
+| --- | --- |
+| 芯片层（启动/中断/时钟/GPIO/UART/SysTick/堆） | ✅ 完成 |
+| 板级层（defconfig / 链接脚本 / 板级初始化） | ✅ 完成 |
+| openvela 构建集成 | ✅ 通过，macOS 上可复现 |
+| 镜像布局验证 | ✅ 向量表位于镜像首字节，SP/复位地址正确 |
+| flash CRC 打包 | ✅ 工具已实现，并用真机读回数据交叉验证 |
+| 出厂固件备份 | ✅ 完整 8MB，两次独立读取互证，CRC 块结构零失配 |
+| 真机烧录 | ✅ 写入 `0x11000` 成功，回读逐字节一致 |
+| 真机启动 | ❌ bootloader 拒绝跳转，原因已定位（见下） |
+
+构建产物已核对：
+
+```
+_vectors  0x02010000   ← 向量表在镜像首字节（bootloader 从这里取 SP/PC）
+__start   0x02010130
+初始 SP   0x28002464   ← _ebss + CONFIG_IDLETHREAD_STACKSIZE，落在 SRAM 内
+.data     0x28000000
+```
+
+**烧录成功，但未观测到 NuttX 启动；根因尚未定位。**
+
+真机上做了 5 组单变量实验（详见
+[board/contest_board/README.md](board/contest_board/README.md) 第九节）。可靠的
+结论有两条：
+
+- **bootloader 不校验 app 镜像内容**——把出厂镜像里一个日志字符串的字母翻转
+  （1 字节）后照常启动。这**否定了"需要逆向 bootloader、为镜像补 CRC/hash 头"
+  的方向**，与官方文档一致；bootloader 中的 `img hash err!` 等字符串属于 OTA 路径。
+- **改动复位向量会导致不启动**——只改向量表第 2 个字（4 字节）即可复现。
+
+其余 3 组实验的结论**已作废**：所用探针依赖了未经验证的前提（`SYSRESETREQ` 是否
+重启本 SoC、LED 引脚映射靠标号顺序推断、马达所在的 `LDO_3V3` 未先经 GPIO52
+使能）。这几次弯路连同排查方法一并记录在板级 README 中——对复现本移植的人，
+这比结论本身更有参考价值。
+
+板子状态：出厂固件已从备份恢复并验证可正常启动。
+
+## 六、AI Coding 使用说明
+
+本作品全程由 AI（Claude Code）辅助完成，典型协作环节：
+
+- **需求拆解与可行性判断**：先读参赛规范与赛道要求，再对照 openvela 源码树确认
+  BK7258 确实未被支持，并找到 `vendor/sifli` 的 SF32LB52 移植作为 out-of-tree
+  芯片移植的可行范例，据此确定"公共仓零改动"的技术路线。
+- **硬件事实提取**：从 BK7258 Datasheet 与 Beken `bk_idk` SDK 中定位并交叉验证
+  寄存器基址、中断号、位域、引脚复用值，避免凭记忆写寄存器。
+- **编码**：按 NuttX 的 arch/chip 接口契约实现芯片层，参照同构的 Armv8-M 移植
+  对齐代码风格与 API 约定。
+- **调试**：编译错误逐轮定位修复（`board` target 重名、NVIC 宏签名不匹配、
+  `up_prioritize_irq` 的 Kconfig 依赖、SysTick tick 源缺失、build-id 段挤占
+  向量表位置等）。
+- **逆向**：厂商 CRC 工具无 macOS 版，通过对已编码样本做参数穷举定出算法并全量
+  验证，绕开了平台限制。
+
+完整对话日志见 `logs/` 目录。
