@@ -53,11 +53,15 @@
 
 /* Bring-up marker.
  *
- * The Beken bootloader leaves UART0 enabled and running at 115200 (it prints
- * its own banner through it) before handing control over, so a byte pushed
- * straight into the TX FIFO reaches the console even before this port has
- * configured anything.  That makes these markers usable from the very first
- * instruction, which is what pins down where an early hang happens.
+ * These push a byte straight into the UART0 TX FIFO.
+ *
+ * Do not expect them to work before bk7258_lowsetup() has run.  Disassembling
+ * the Beken bootloader shows it tears UART0 down on the way out: the call at
+ * 0x02000ac2, reached unconditionally just before the jump, ends up in a
+ * routine that writes both the UART0 block (0x44820000) and the system clock
+ * registers (0x44010000).  An earlier version of this port assumed the
+ * bootloader left the console running and put markers at the very top of
+ * __start(); those markers can only have written into an ungated peripheral.
  *
  * Nothing here may touch .data or .bss: both are still uninitialised when the
  * first marker runs.
