@@ -326,3 +326,48 @@ bx   r6                  ; 跳到 vector[1]
 （它读一个标志位后条件调用 `0x02000a90`，再尾调 `0x02000ac2`），确认它是否关闭了
 UART 或改变了外设访问权限——若是，则本移植早期访问 UART/GPIO 时会立即故障，而出厂
 app 因为入口处先做完整初始化而不受影响。
+
+### 下一步：用 SWD 在跳转处断下（需调试器）
+
+黑盒探针已经走到尽头——bootloader 的行为完全查清且与本移植吻合，但合规镜像仍不
+执行。要再进一步，最有效的是在跳转指令处断下，直接观察跳转后 PC 落在哪、是否触发
+fault。
+
+**接线**（引脚来自本板原理图 Sheet 2 与 BK7258 datasheet）：
+
+| 信号 | BK7258 引脚 | 说明 |
+| --- | --- | --- |
+| SWCLK | 83（`P20/0SCL/SWCLK/R6/D9`） | 板上复用为 `IIC1_SCL`，接 G-Sensor |
+| SWDIO | 84（`P21/0SDA/SWDIO/ADC6/R5/D8`） | 板上复用为 `IIC1_SDA` |
+| GND | 任意地 | — |
+
+注意这两脚在本板上被 G-Sensor 的 I2C 占用，需确认有测试点或焊盘可接；引脚 43 另有
+独立的 `SWD` 信号，用途需查 datasheet 确认。
+
+**软件**：`brew install open-ocd`。BK7258 是 Armv8-M（STAR-MC1，Cortex-M33 兼容），
+可先用通用 Cortex-M 配置起步：
+
+```bash
+openocd -f interface/cmsis-dap.cfg -c "transport select swd" \
+        -f target/swj-dp.tcl -c "adapter speed 1000" \
+        -c "swj_newdap bk7258 cpu -irlen 4; dap create bk7258.dap -chain-position bk7258.cpu" \
+        -c "target create bk7258.cpu cortex_m -dap bk7258.dap" -c init
+```
+
+**断点位置**（地址来自本目录记录的反汇编）：
+
+| 地址 | 含义 |
+| --- | --- |
+| `0x02001790` | 计算 app 地址的函数入口 |
+| `0x0200172c` | 跳转函数入口，`r0` = app 基址（应为 `0x02010000`） |
+| `0x02001738` | 刚读完 `vector[0]/[1]`，此时 `r5`=SP、`r6`=PC |
+| **`0x02001782`** | **`bx r9`——跳转本身，在此单步进入即可看到目标处第一条指令** |
+
+要确认的三件事：
+
+1. `0x0200172c` 处 `r0` 是否等于 `0x02010000`（若不是，说明分区表解析与预期不符）
+2. `0x02001738` 之后 `r5`/`r6` 是否等于我们镜像的 `vector[0]`/`vector[1]`
+3. 在 `0x02001782` 单步后 PC 落在哪——若立即进入 HardFault/BusFault 处理，读
+   `CFSR`(`0xE000ED28`)、`HFSR`(`0xE000ED2C`)、`BFAR`(`0xE000ED38`) 即可定位故障源
+
+若 SWD 连不上，先确认 eFuse 是否禁用了调试口（本板出厂固件是量产固件，有此可能）。
