@@ -70,10 +70,11 @@ config BK7258_EARLY_MARKERS
 		of __start(), before this port configures the clocks, the pins or
 		the serial driver.
 
-		The Beken bootloader leaves UART0 running at 115200, so these
-		markers appear even when the rest of the port is not working yet.
-		They are the quickest way to tell whether the bootloader handed
-		control over at all, and if it did, which init step hangs.
+		These only work once bk7258_lowsetup() has configured the console.
+		The Beken bootloader does not leave UART0 running: it deinitialises
+		the UART and touches the system clock registers immediately before
+		branching to the application, so markers placed ahead of the port's
+		own UART setup write into a peripheral that has been torn down.
 
 		Markers: 1=entry, 2=VTOR set, 3=FPU on, 4=.data/.bss ready,
 		5=clocks up, 6=console configured.
