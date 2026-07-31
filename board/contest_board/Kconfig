@@ -1,11 +1,19 @@
 #
-# Contest 2026 team 000 board placeholder
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+# Agora ConvoAI Kit R1 (Beken BK7258) board options.
 #
 
-if ARCH_BOARD_CONTEST2026_000_BOARD
+if ARCH_BOARD_CUSTOM
 
-config ARCH_BOARD_CONTEST2026_000_BOARD_TAG
-	string "Board tag"
-	default "contest2026_000_board"
+comment "Agora ConvoAI Kit R1 (BK7258) Board Options"
 
-endif
+config BK7258_BOARD_LED
+	bool "Board status LED"
+	default n
+	select ARCH_HAVE_LEDS
+	---help---
+		Drive the on-board status LED from the NuttX LED interface.
+
+endif # ARCH_BOARD_CUSTOM

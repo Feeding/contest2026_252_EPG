@@ -1,0 +1,116 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+# BK7258 (Beken) chip layer for openvela / NuttX.
+#
+
+if ARCH_CHIP_CUSTOM
+
+comment "BK7258 Configuration Options"
+
+choice
+	prompt "Beken Chip Selection"
+	default ARCH_CHIP_BK7258
+
+config ARCH_CHIP_BK7258
+	bool "bk7258"
+	select ARCH_ARMV8M
+	select ARCH_CORTEXM33
+	select ARCH_HAVE_FPU
+	select ARCH_HAVE_MPU
+	select ARCH_HAVE_FETCHADD
+	select ARCH_HAVE_IRQPRIO
+	select ARM_HAVE_MPU_UNIFIED
+	select ARMV8M_HAVE_STACKCHECK
+	select ARMV8M_USEBASEPRI
+	---help---
+		Beken BK7258: Armv8-M STAR-MC1 (Cortex-M33 compatible) MCU up to
+		480MHz, with Wi-Fi 6 and Bluetooth LE 5.4, 640KB shared SRAM,
+		XIP flash and SiP PSRAM.
+
+endchoice
+
+menu "BK7258 Peripheral Support"
+
+config BK7258_UART0
+	bool "UART0"
+	default y
+	select UART0_SERIALDRIVER
+	select ARCH_HAVE_SERIAL_TERMIOS
+	---help---
+		UART0 is routed to GPIO10 (RX) / GPIO11 (TX), which is the same
+		pin pair used by the ROM flash-download engine (DL_UART).  On the
+		Agora ConvoAI Kit R1 these pins are wired to the on-board CH340
+		USB-serial bridge, so UART0 is the natural console.
+
+config BK7258_UART1
+	bool "UART1"
+	default n
+	select UART1_SERIALDRIVER
+	select ARCH_HAVE_SERIAL_TERMIOS
+	---help---
+		UART1 on GPIO0 (TX) / GPIO1 (RX).
+
+config BK7258_UART2
+	bool "UART2"
+	default n
+	select UART2_SERIALDRIVER
+	select ARCH_HAVE_SERIAL_TERMIOS
+	---help---
+		UART2 on GPIO40 (RX) / GPIO41 (TX), alternate GPIO30/GPIO31.
+
+endmenu # BK7258 Peripheral Support
+
+config BK7258_EARLY_MARKERS
+	bool "Emit early bring-up markers on UART0"
+	default n
+	---help---
+		Push single characters straight into the UART0 TX FIFO at each step
+		of __start(), before this port configures the clocks, the pins or
+		the serial driver.
+
+		The Beken bootloader leaves UART0 running at 115200, so these
+		markers appear even when the rest of the port is not working yet.
+		They are the quickest way to tell whether the bootloader handed
+		control over at all, and if it did, which init step hangs.
+
+		Markers: 1=entry, 2=VTOR set, 3=FPU on, 4=.data/.bss ready,
+		5=clocks up, 6=console configured.
+
+config BK7258_LED_PROBE
+	bool "Blink the board LEDs at __start()"
+	default n
+	---help---
+		Alternate the two board LEDs (red on GPIO40, green on GPIO41 per the
+		schematic) forever, as the first thing __start() does.
+
+		This answers "did the bootloader hand control to this image?" using
+		only the always-on GPIO block: no clock gating, no pin mux, no UART,
+		and no assumption about whether SYSRESETREQ reboots this SoC.  If the
+		LEDs alternate, the image is running.
+
+		The board will not boot anything while this is enabled.
+
+config BK7258_SELFRESET_PROBE
+	bool "Self-reset probe at __start()"
+	default n
+	---help---
+		Spin for about half a second at the very top of __start() and then
+		trigger a system reset, forever.
+
+		This answers "did the bootloader hand control to this image?"
+		without relying on the console, which is useful precisely when the
+		console is the thing that is not working.  If this code runs, the
+		board cycles through the bootloader roughly twice a second, so its
+		UART download window keeps reopening and tools/bk_flash.py links up
+		with no manual RST press at all.  If a manual reset is still
+		needed, the image never got control.
+
+		Only the ARMv8-M reset register is written; no pin is driven, so
+		this cannot contend with anything else on the board.
+
+		The board will not boot anything while this is enabled.  Turn it
+		off once the question is answered.
+
+endif # ARCH_CHIP_CUSTOM
