@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "team_id": "contest2026-252",
+  "github_login": "Feeding",
+  "generator": "claude-code-collector@1.2.0",
+  "sessions": [
+    {
+      "session_id": "0b6320db-08af-47da-8744-54457ddbaca0",
+      "tool": "claude-code",
+      "started_at": "2026-07-31T08:18:14.638Z",
+      "last_event_at": "2026-07-31T08:18:14.638Z",
+      "event_count": 89,
+      "raw_event_count": 194,
+      "file_path": "logs/Feeding/2026-07-31/claude-code__0b6320db-08af-47da-8744-54457ddbaca0.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-fable-5"
+    },
+    {
+      "session_id": "234c867f-d855-4013-8c38-ded53fd4f59b",
+      "tool": "claude-code",
+      "started_at": "2026-07-30T15:07:23.180Z",
+      "last_event_at": "2026-07-31T08:18:14.710Z",
+      "event_count": 1025,
+      "raw_event_count": 1318,
+      "file_path": "logs/Feeding/2026-07-31/claude-code__234c867f-d855-4013-8c38-ded53fd4f59b.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5"
+    },
+    {
+      "session_id": "e1004f5e-9556-4e2b-977e-2b86d2e8c9f0",
+      "tool": "claude-code",
+      "started_at": "2026-07-31T08:18:14.835Z",
+      "last_event_at": "2026-07-31T08:18:14.835Z",
+      "event_count": 1889,
+      "raw_event_count": 2569,
+      "file_path": "logs/Feeding/2026-07-31/claude-code__e1004f5e-9556-4e2b-977e-2b86d2e8c9f0.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5"
+    }
+  ],
+  "updated_at": "2026-07-31T08:20:11.655808+00:00"
+}
