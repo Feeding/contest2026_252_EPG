@@ -30,6 +30,7 @@
 #include <nuttx/board.h>
 
 #include "bk7258_wdt.h"
+#include "bk7258_gpio.h"
 
 #include "arm_internal.h"
 
@@ -69,6 +70,17 @@ void bk7258_serial_monitor_start(void);
 
 void board_late_initialize(void)
 {
+  /* Switch on the shared external 3.3 V rail.  GPIO52 is net LDO33_EN, the
+   * supply gate for the motor, the LCD panels, the SD NAND and the NFC
+   * front end (vendor: CONFIG_LDO3V3_CTRL_GPIO=52, driven high first thing
+   * at boot).  The vendor arbitrates it with a per-module voting scheme;
+   * until more than one of those consumers exists here, on-at-boot is the
+   * whole policy.
+   */
+
+  bk7258_gpio_config(52, true, false, false);
+  bk7258_gpio_write(52, true);
+
   bk7258_serial_monitor_start();
 
 #ifdef CONFIG_FS_PROCFS

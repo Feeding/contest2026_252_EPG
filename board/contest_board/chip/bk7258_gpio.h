@@ -67,6 +67,22 @@
 #define GPIO_CFG_INT_EN             (1 << 12) /* Bit 12: Interrupt enable */
 #define GPIO_CFG_INT_CLEAR          (1 << 13) /* Bit 13: Interrupt clear */
 
+/* Interrupt trigger types, matching the 2-bit field at bits 10-11 and the
+ * vendor enumeration (hal_gpio_types.h).
+ */
+
+#define GPIO_INT_LOW_LEVEL          0
+#define GPIO_INT_HIGH_LEVEL         1
+#define GPIO_INT_RISING_EDGE        2
+#define GPIO_INT_FALLING_EDGE       3
+
+/* Latched interrupt status, one bit per pin, write-1-to-clear
+ * (vendor gpio_struct.h REG_0x40/0x41).
+ */
+
+#define BK7258_GPIO_INTST_0_31      (BK7258_AON_GPIO_BASE + (0x40 << 2))
+#define BK7258_GPIO_INTST_32_55     (BK7258_AON_GPIO_BASE + (0x41 << 2))
+
 /* Peripheral (alternate) function select.  These registers live in the
  * system register block, not the GPIO block: eight pins per 32-bit word,
  * four bits each.  The value is the index into the pin's alternate function
@@ -137,5 +153,18 @@ void bk7258_gpio_config(int pin, bool output, bool pullup, bool pulldown);
 
 void bk7258_gpio_write(int pin, bool value);
 bool bk7258_gpio_read(int pin);
+
+/****************************************************************************
+ * Name: bk7258_gpio_setint
+ *
+ * Description:
+ *   Attach a handler to a pin interrupt and configure its trigger, or
+ *   detach with a NULL handler.  The pin must already be configured as an
+ *   input.  All pin interrupts funnel through one NVIC line; the dispatcher
+ *   is installed on first use.
+ *
+ ****************************************************************************/
+
+int bk7258_gpio_setint(int pin, uint8_t type, void (*handler)(int pin, void *arg), void *arg);
 
 #endif /* __BOARD_CONTEST_BOARD_CHIP_BK7258_GPIO_H */

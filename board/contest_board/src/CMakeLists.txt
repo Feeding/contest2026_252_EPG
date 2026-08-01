@@ -27,6 +27,18 @@ if(CONFIG_BOARDCTL)
   list(APPEND SRCS bk7258_appinit.c)
 endif()
 
+if(CONFIG_USERLED)
+  list(APPEND SRCS bk7258_userleds.c)
+endif()
+
+if(CONFIG_ARCH_BUTTONS)
+  list(APPEND SRCS bk7258_buttons.c)
+endif()
+
+if(CONFIG_DEV_GPIO)
+  list(APPEND SRCS bk7258_gpiodev.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR})

@@ -24,6 +24,9 @@ config ARCH_CHIP_BK7258
 	select ARM_HAVE_MPU_UNIFIED
 	select ARMV8M_HAVE_STACKCHECK
 	select ARMV8M_USEBASEPRI
+	select ARCH_HAVE_LEDS
+	select ARCH_HAVE_BUTTONS
+	select ARCH_HAVE_IRQBUTTONS
 	---help---
 		Beken BK7258: Armv8-M STAR-MC1 (Cortex-M33 compatible) MCU up to
 		480MHz, with Wi-Fi 6 and Bluetooth LE 5.4, 640KB shared SRAM,
