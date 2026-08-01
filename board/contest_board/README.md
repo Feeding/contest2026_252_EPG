@@ -34,10 +34,32 @@ board/contest_board/
 ├── include/board.h             # 时钟与引脚约定
 ├── scripts/ld.script           # 链接脚本（含 XIP 地址推导）
 ├── configs/nsh/defconfig       # 最小 NSH 基线
+├── apps/                       # 板级演示应用（经 vendor/openvela/apps 软链进 apps 构建）
+│   └── eyes/                   # 双屏机器人眼动画：目光游移 + 眨眼 + 脏矩形增量刷新
 └── tools/
     ├── bk_crc_pack.py          # flash CRC 编码 / 校验
     └── bk_flash.py             # 持续等待复位窗口的烧录器
 ```
+
+## 二点五、apps 接入（本地管道）
+
+演示应用（`eyes`）的代码也在参赛仓内。apps 构建树经 `vendor/` 下两处
+**未提交的本地 plumbing** 找到它们（与上面的板级软链同类，公共仓提交
+历史零改动）：
+
+```bash
+# 1. 软链：apps 构建 → 参赛仓 apps 目录
+ln -s ../../contest2026_252_EPG/board/contest_board/apps vendor/openvela/apps
+
+# 2. 桥接文件 vendor/openvela/CMakeLists.txt（仅两行有效语句）:
+#      nuttx_add_subdirectory()
+#      nuttx_generate_kconfig(MENUDESC "openvela")
+```
+
+链路：`apps/vendor -> ../vendor`（仓库自带）→ `vendor/CMakeLists.txt`
+glob 一级子目录 → `vendor/openvela/CMakeLists.txt`（桥接）→
+`vendor/openvela/apps`（软链）→ 本目录 `apps/`。defconfig 打开
+`CONFIG_CONTEST_EYES=y` 后 NSH 内置 `eyes` 命令。
 
 ## 三、关键硬件事实（来自 BK7258 Datasheet V2.1 与 Beken bk_idk SDK）
 
