@@ -418,13 +418,13 @@ struct i2c_master_s *bk7258_i2cbus_initialize(int port)
                  I2C_GLOBAL_SOFT_RESET | I2C_GLOBAL_CLK_BYPASS);
 
       /* I2C1 reaches two pad sets: GPIO0/1 (alternate 1) and GPIO42/43
-       * (alternate 0).  The camera's SCCB lives on 42/43 -- the vendor
-       * firmware bit-bangs exactly these pins and the SDK's DVP driver
-       * defaults to hardware I2C1 here.  Nothing ever answered on 0/1.
+       * (alternate 0).  The camera SCCB on 42/43 belongs to the
+       * bit-banged bus (vendor-faithful, and the pins' last owner wins)
+       * -- the hardware engine keeps the accelerometer pads.
        */
 
-      bk7258_gpio_setaf(42, 0, true);
-      bk7258_gpio_setaf(43, 0, true);
+      bk7258_gpio_setaf(0, 1, true);
+      bk7258_gpio_setaf(1, 1, true);
     }
   else
     {
