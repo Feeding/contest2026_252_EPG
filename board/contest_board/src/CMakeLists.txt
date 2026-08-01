@@ -39,6 +39,10 @@ if(CONFIG_DEV_GPIO)
   list(APPEND SRCS bk7258_gpiodev.c)
 endif()
 
+if(CONFIG_I2C_BITBANG)
+  list(APPEND SRCS bk7258_i2c_bitbang.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR})

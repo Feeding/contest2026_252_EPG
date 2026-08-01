@@ -63,6 +63,15 @@ config BK7258_UART2
 	---help---
 		UART2 on GPIO40 (RX) / GPIO41 (TX), alternate GPIO30/GPIO31.
 
+config BK7258_I2C1
+	bool "I2C1 (GPIO0 SCL / GPIO1 SDA)"
+	default n
+	select I2C
+	---help---
+		Polled I2C master on the I2C1 block.  On the Agora ConvoAI Kit R1
+		this bus reaches the SC7A20 accelerometer; the pins double as the
+		UART-expansion header pads.
+
 endmenu # BK7258 Peripheral Support
 
 config BK7258_EARLY_MARKERS
