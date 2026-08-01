@@ -87,6 +87,14 @@
 #define BK7258_AON_GPIO_BASE    0x44000400ul
 #define BK7258_AON_WDT_BASE     0x44000600ul
 #define BK7258_SYS_BASE         0x44010000ul
+
+/* Per-CPU interrupt routing matrix inside the system block: one enable bit
+ * per NVIC line, 32 lines per register starting at word 0x20.  A line only
+ * reaches the NVIC while its bit here is set; the bit index equals the NVIC
+ * line number.
+ */
+
+#define BK7258_SYS_CPU0_INT_EN(n)   (BK7258_SYS_BASE + (0x20 << 2) + (((n) >> 5) << 2))
 #define BK7258_FLASH_REG_BASE   0x44030000ul
 #define BK7258_WDT_BASE         0x44800000ul
 #define BK7258_TIMER0_BASE      0x44810000ul

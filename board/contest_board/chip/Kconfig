@@ -93,6 +93,70 @@ config BK7258_LED_PROBE
 
 		The board will not boot anything while this is enabled.
 
+config BK7258_TXPIN_PROBE
+	bool "Bit-bang GPIO11 (UART0 TX) at __start()"
+	default n
+	---help---
+	  Toggle GPIO11 as a plain GPIO, roughly a millisecond per level, as the
+	  first thing __start() does.
+
+	  GPIO11 is UART0 TX and reaches the CH340 bridge, confirmed by both the
+	  datasheet and the board schematic.  Every level change lands in the
+	  host's receiver as a framing error, so the host sees a steady stream of
+	  bytes: reading anything at all from the port proves this image executes.
+
+	  Unlike the LED probe this needs no clock gate, no pin mux, no UART
+	  peripheral, no power rail, and nothing for a person to watch -- the
+	  answer comes back over the same cable used for flashing.
+
+	  The board will not boot anything while this is enabled.
+
+config BK7258_TXPIN_TRACE
+	bool "Bit-bang a GPIO11 burst at each step of __start()"
+	default n
+	---help---
+	  Emit one burst on GPIO11 at each step of the boot -- entry, vector table
+	  and FPU, .bss/.data, clocks, console, board init -- with the line held
+	  idle in between so the host sees them as separate runs of bytes.
+
+	  Counting the bursts locates the step that hangs without needing a
+	  working console, a debugger, or one flash cycle per checkpoint.  Six
+	  bursts means __start() ran to completion and nx_start() was entered.
+
+	  Unlike the other probes this one does not stop the boot: it only slows
+	  it down, about half a second per step.
+
+config BK7258_UART_DUMP
+	bool "Shift the console UART's registers out on GPIO11"
+	default n
+	---help---
+	  After bk7258_lowsetup() returns, read the console UART's line
+	  configuration, FIFO status and device id back and shift each out on
+	  GPIO11 as a 32-bit pattern -- long burst for a one, short for a zero --
+	  repeating forever.
+
+	  Use this when the console produces nothing and there is no way to ask it
+	  why: arm_lowputc() waits on write-ready with no timeout, so a UART that
+	  never asserts it stops the boot silently.  A device id of zero says the
+	  block has no clock; a plausible id with write-ready clear says it is
+	  clocked but misconfigured.
+
+	  The board will not boot anything while this is enabled.
+
+config BK7258_TXPIN_PROBE_LATE
+	bool "Bit-bang GPIO11 just before nx_start()"
+	default n
+	---help---
+	  The same GPIO11 bit-bang as BK7258_TXPIN_PROBE, but placed after the
+	  clocks, the console and board_early_initialize() rather than before
+	  them, so the two together bisect the boot.
+
+	  Traffic on the port means everything this chip layer does completed and
+	  a fault would be inside NuttX; silence means the boot dies somewhere in
+	  bk7258_start.c above the call.
+
+	  The board will not boot anything while this is enabled.
+
 config BK7258_SELFRESET_PROBE
 	bool "Self-reset probe at __start()"
 	default n
@@ -108,8 +172,11 @@ config BK7258_SELFRESET_PROBE
 		with no manual RST press at all.  If a manual reset is still
 		needed, the image never got control.
 
-		Only the ARMv8-M reset register is written; no pin is driven, so
-		this cannot contend with anything else on the board.
+		The reset is done by arming the watchdog, not by writing ARMv8-M's
+		SYSRESETREQ: the vendor SDK never touches AIRCR anywhere, and both
+		its bk_reboot() and the Beken bootloader reboot through the
+		watchdog, so SYSRESETREQ does not appear to reset this SoC.  No pin
+		is driven, so this cannot contend with anything else on the board.
 
 		The board will not boot anything while this is enabled.  Turn it
 		off once the question is answered.

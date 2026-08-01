@@ -29,6 +29,8 @@
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
 
+#include "bk7258_wdt.h"
+
 #include "arm_internal.h"
 
 /****************************************************************************
@@ -63,10 +65,39 @@ void board_early_initialize(void)
  ****************************************************************************/
 
 #ifdef CONFIG_BOARD_LATE_INITIALIZE
+void bk7258_serial_monitor_start(void);
+
 void board_late_initialize(void)
 {
+  bk7258_serial_monitor_start();
+
 #ifdef CONFIG_FS_PROCFS
   /* Mounting procfs is handled by the init script, not here. */
 #endif
+}
+#endif
+
+/****************************************************************************
+ * Name: board_reset
+ *
+ * Description:
+ *   Reset the board.  Wired to boardctl(BOARDIOC_RESET) and therefore to
+ *   the NSH `reboot` command.
+ *
+ *   The reset goes through the watchdog because that is the only mechanism
+ *   that actually resets this SoC -- the vendor SDK never writes AIRCR and
+ *   SYSRESETREQ was tried on hardware and does nothing.  A reboot lands in
+ *   the Beken bootloader, whose UART download window is what the flashing
+ *   tools wait for, so `reboot` doubles as the no-hands way to make the
+ *   board flashable.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_BOARDCTL_RESET
+int board_reset(int status)
+{
+  UNUSED(status);
+  bk7258_wdt_reboot();
+  return 0;
 }
 #endif

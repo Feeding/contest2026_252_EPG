@@ -38,7 +38,7 @@
  * Name: bk7258_gpio_setaf
  ****************************************************************************/
 
-void bk7258_gpio_setaf(int pin, uint8_t af)
+void bk7258_gpio_setaf(int pin, uint8_t af, bool input)
 {
   uint32_t regval;
 
@@ -61,9 +61,24 @@ void bk7258_gpio_setaf(int pin, uint8_t af)
    * be off, otherwise they fight the peripheral for the pad.
    */
 
+  /* Match the pad state the Beken bootloader proves out: its UART0 setup
+   * writes 0x7C to the RX pad and 0x78 to TX.  Both hand the pad to the
+   * peripheral with the GPIO output driver off and a pull-up on; RX also
+   * keeps the input path enabled, without which the peripheral can drive the
+   * pad but never see it.  An earlier version cleared INPUT_EN on every AF
+   * pad, which silently made every UART transmit-only.
+   */
+
   regval  = getreg32(BK7258_GPIO_CFG(pin));
-  regval &= ~(GPIO_CFG_INPUT_EN | GPIO_CFG_OUTPUT_EN);
-  regval |= GPIO_CFG_FUNC_EN;
+  regval &= ~GPIO_CFG_INPUT_EN;
+  regval |= GPIO_CFG_OUTPUT_DIS | GPIO_CFG_FUNC_EN |
+            GPIO_CFG_PULL_EN | GPIO_CFG_PULL_UP;
+
+  if (input)
+    {
+      regval |= GPIO_CFG_INPUT_EN;
+    }
+
   putreg32(regval, BK7258_GPIO_CFG(pin));
 }
 
@@ -84,10 +99,15 @@ void bk7258_gpio_config(int pin, bool output, bool pullup, bool pulldown)
 
   /* Take the pin back from any peripheral that was driving it. */
 
-  regval &= ~(GPIO_CFG_FUNC_EN | GPIO_CFG_INPUT_EN | GPIO_CFG_OUTPUT_EN |
+  regval &= ~(GPIO_CFG_FUNC_EN | GPIO_CFG_INPUT_EN | GPIO_CFG_OUTPUT_DIS |
               GPIO_CFG_PULL_EN | GPIO_CFG_PULL_UP);
 
-  regval |= output ? GPIO_CFG_OUTPUT_EN : GPIO_CFG_INPUT_EN;
+  /* Drive the pad by leaving GPIO_CFG_OUTPUT_DIS clear; an input pin gets the
+   * opposite of both bits.  This mirrors the vendor io_mode field, which is
+   * bits 3:2 taken together: 0b00 selects output, 0b11 selects input.
+   */
+
+  regval |= output ? 0 : (GPIO_CFG_OUTPUT_DIS | GPIO_CFG_INPUT_EN);
 
   if (pullup)
     {

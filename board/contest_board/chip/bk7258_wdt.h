@@ -1,5 +1,7 @@
 /****************************************************************************
- * board/contest_board/chip/bk7258_allocateheap.c
+ * board/contest_board/chip/bk7258_wdt.h
+ *
+ * Watchdog control for the BK7258.
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -18,65 +20,58 @@
  *
  ****************************************************************************/
 
+#ifndef __BOARD_CONTEST_BOARD_CHIP_BK7258_WDT_H
+#define __BOARD_CONTEST_BOARD_CHIP_BK7258_WDT_H
+
 /****************************************************************************
  * Included Files
  ****************************************************************************/
 
-#include <nuttx/config.h>
+#include <stdint.h>
 
-#include <stddef.h>
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
 
-#include <nuttx/arch.h>
-#include <nuttx/kmalloc.h>
+/* The watchdog is the only reset mechanism that works on this SoC: the
+ * vendor SDK never touches AIRCR, and both its bk_reboot() and the Beken
+ * bootloader restart the chip by arming a short watchdog period and
+ * spinning.  SYSRESETREQ was tried on real hardware and does nothing.
+ *
+ * Two watchdogs are written in tandem, mirroring the bootloader routine at
+ * 0x02000fa0 exactly: the always-on block at 0x44000600 and the peripheral
+ * block's counter at 0x44800010.  Each write is unlock (0x5A in the top
+ * byte) then commit (0xA5), period in the low 16 bits.
+ */
 
-#include "arm_internal.h"
-#include "bk7258_memorymap.h"
-
-/* Supplied by the link script: the end of the RAM region. */
-
-extern uint8_t _eram[];
+#define BK7258_WDT_PERIOD_RUN    0xfffc  /* Generous heartbeat period */
+#define BK7258_WDT_PERIOD_BOOT   6       /* Immediate reset, bootloader value */
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
 /****************************************************************************
- * Name: up_allocate_heap
+ * Name: bk7258_wdt_arm
  *
  * Description:
- *   The heap occupies everything between the top of the IDLE thread stack
- *   and the end of the 640KB shared SRAM.
+ *   Arm (or re-arm) both watchdogs with the given period.  Feeding is the
+ *   same operation as arming.
  *
  ****************************************************************************/
 
-void up_allocate_heap(void **heap_start, size_t *heap_size)
-{
-  /* The end comes from the link script, not from BK7258_SRAM_END: the chip
-   * has 640K of SRAM but this board only links, and only boots from, part of
-   * it.  See the memory region comment in scripts/ld.script.
-   */
-
-  *heap_start = (void *)g_idle_topstack;
-  *heap_size  = (uintptr_t)_eram - g_idle_topstack;
-}
+void bk7258_wdt_arm(uint32_t period);
 
 /****************************************************************************
- * Name: arm_addregion
+ * Name: bk7258_wdt_reboot
  *
  * Description:
- *   Register any additional, non-contiguous memory with the allocator.
+ *   Reset the chip through the watchdog.  Does not return.  On the way back
+ *   up the Beken bootloader reopens its UART download window, so a reboot
+ *   is also how the board is made flashable without anyone pressing RST.
  *
  ****************************************************************************/
 
-#if CONFIG_MM_REGIONS > 1
-void arm_addregion(void)
-{
-#ifdef CONFIG_BK7258_PSRAM_HEAP
-  /* The SiP PSRAM is only usable once the PSRAM controller has been brought
-   * up, which this minimal port does not yet do.
-   */
+void bk7258_wdt_reboot(void) noreturn_function;
 
-  kumm_addregion((void *)BK7258_PSRAM_BASE, CONFIG_BK7258_PSRAM_HEAP_SIZE);
-#endif
-}
-#endif
+#endif /* __BOARD_CONTEST_BOARD_CHIP_BK7258_WDT_H */

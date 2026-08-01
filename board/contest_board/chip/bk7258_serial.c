@@ -35,9 +35,12 @@
 #include <nuttx/irq.h>
 #include <nuttx/fs/ioctl.h>
 #include <nuttx/serial/serial.h>
+#include <nuttx/kthread.h>
+#include <nuttx/signal.h>
 
 #include "arm_internal.h"
 #include "bk7258_lowputc.h"
+#include "bk7258_wdt.h"
 #include "bk7258_uart.h"
 #include "chip.h"
 
@@ -259,6 +262,81 @@ static inline void bk7258_serialout(struct bk7258_dev_s *priv,
   putreg32(value, priv->base + offset);
 }
 
+/* Black-box breadcrumbs.
+ *
+ * The wedge this port is chasing dies inside this interrupt handler with
+ * interrupts masked and nothing dispatched, so nothing can report from the
+ * inside.  These notes go to a fixed address in SRAM3 -- outside everything
+ * this image links or heaps -- and survive the watchdog reset that follows;
+ * __start() prints them on the way back up.  Tags: 0x11 handler entry with
+ * int_status, 0x22 rx budget chosen, 0x33 handler exit with round count.
+ */
+
+#define BB_BASE  ((volatile uint32_t *)0x28048000)
+
+static inline void bb_note(uint32_t word)
+{
+  volatile uint32_t *bb = BB_BASE;
+  uint32_t seq;
+
+  if (bb[0] != 0xb1acb0c5)
+    {
+      bb[0] = 0xb1acb0c5;
+      bb[1] = 0;
+    }
+
+  seq = bb[1] + 1;
+  bb[1] = seq;
+  bb[2 + (seq % 29)] = word;
+}
+
+/****************************************************************************
+ * Name: bk7258_fifo_status_stable
+ *
+ * Description:
+ *   Read the FIFO status register until two consecutive reads agree.
+ *
+ *   The register mixes live TX state (count in bits 0-7) and RX state
+ *   (count in bits 8-15, flags at 16+) in one word, and both sides update
+ *   asynchronously to the bus clock.  While the transmitter is draining --
+ *   which on a console means during every echo -- a single read can return
+ *   a torn value, and a torn RX count that reads high is what sent
+ *   uart_recvchars after a byte that was never there: popping an empty FIFO
+ *   underflows the hardware count, after which "data available" is true
+ *   forever and the interrupt handler never comes home.  The console died
+ *   on exactly the second echoed character every run because that is the
+ *   first moment RX status reads overlap TX drain activity.
+ *
+ *   Two identical consecutive reads cannot both be torn by the same
+ *   in-flight update, so agreement is taken as the true value.  The loop is
+ *   bounded; persistent disagreement falls back to the latest read, which
+ *   at worst delays a byte to the next interrupt.
+ *
+ ****************************************************************************/
+
+static uint32_t bk7258_fifo_status_stable(struct bk7258_dev_s *priv)
+{
+  uint32_t prev;
+  uint32_t curr;
+  int tries;
+
+  prev = bk7258_serialin(priv, BK7258_UART_FIFO_STATUS_OFFSET);
+
+  for (tries = 0; tries < 8; tries++)
+    {
+      curr = bk7258_serialin(priv, BK7258_UART_FIFO_STATUS_OFFSET);
+
+      if (curr == prev)
+        {
+          break;
+        }
+
+      prev = curr;
+    }
+
+  return curr;
+}
+
 /****************************************************************************
  * Name: bk7258_setup
  *
@@ -343,25 +421,69 @@ static int bk7258_interrupt(int irq, void *context, void *arg)
   DEBUGASSERT(dev != NULL && dev->priv != NULL);
   priv = dev->priv;
 
-  /* Read and acknowledge whatever is pending.  The status bits are
-   * write-1-to-clear.
+  /* Keep draining until nothing we enabled is still pending.
+   *
+   * A single read-clear-handle pass loses events on this block: a byte that
+   * lands after the write-1-to-clear but before exception return latches the
+   * status bit while the NVIC line is already active, and depending on how
+   * the routing matrix forwards it, no new edge may ever arrive.  The first
+   * interactive test showed exactly that shape -- two characters echoed,
+   * then RX went permanently quiet.
+   *
+   * The loop is bounded, and running out of the bound is treated as a stuck
+   * source: everything is masked so the system stays alive and observable
+   * rather than wedged inside this handler.  A console that answers with RX
+   * dead is evidence; a hung board is not.
    */
 
-  status = bk7258_serialin(priv, BK7258_UART_INT_STATUS_OFFSET);
-  bk7258_serialout(priv, BK7258_UART_INT_STATUS_OFFSET, status);
+  int rounds;
 
-  /* Only act on sources we asked for. */
+  for (rounds = 0; ; rounds++)
+    {
+      status  = bk7258_serialin(priv, BK7258_UART_INT_STATUS_OFFSET);
 
-  status &= priv->im;
+      if ((status & priv->im) == 0 || rounds >= 32)
+        {
+          break;
+        }
 
-  if ((status & (UART_INT_RX_NEED_READ | UART_INT_RX_FINISH)) != 0)
+      bb_note(0x11000000 | (status & 0xffff));
+
+      bk7258_serialout(priv, BK7258_UART_INT_STATUS_OFFSET, status);
+
+      if ((status & priv->im &
+           (UART_INT_RX_NEED_READ | UART_INT_RX_FINISH)) != 0)
+        {
+          bb_note(0x22000000);
+          uart_recvchars(dev);
+        }
+
+      if ((status & priv->im & UART_INT_TX_NEED_WRITE) != 0)
+        {
+          uart_xmitchars(dev);
+        }
+    }
+
+  /* Sweep stragglers.  A byte can land after the last status clear without
+   * re-asserting need_read -- the interrupt condition is computed from the
+   * same lying count field -- and a byte the interrupt never announces
+   * would otherwise sit in the FIFO until the next unrelated interrupt,
+   * which is exactly the two-character-late delivery this port debugged on
+   * hardware.  rd_ready is checked directly on the way out.
+   */
+
+  if ((bk7258_fifo_status_stable(priv) & UART_FIFO_STATUS_RD_READY) != 0)
     {
       uart_recvchars(dev);
     }
 
-  if ((status & UART_INT_TX_NEED_WRITE) != 0)
+  bb_note(0x33000000 | (uint32_t)rounds);
+
+  if (rounds >= 32)
     {
-      uart_xmitchars(dev);
+      priv->im = 0;
+      bk7258_serialout(priv, BK7258_UART_INT_ENABLE_OFFSET, 0);
+      bk7258_serialout(priv, BK7258_UART_INT_STATUS_OFFSET, 0xffffffff);
     }
 
   return OK;
@@ -525,8 +647,23 @@ static bool bk7258_rxavailable(struct uart_dev_s *dev)
 {
   struct bk7258_dev_s *priv = dev->priv;
 
-  return (bk7258_serialin(priv, BK7258_UART_FIFO_STATUS_OFFSET) &
-          UART_FIFO_STATUS_RX_EMPTY) == 0;
+  /* Trust rd_ready and nothing else.
+   *
+   * The count and empty fields of fifo_status lie under load, in both
+   * directions.  With the transmitter active -- every console echo -- the
+   * empty flag first read "not empty" forever and sent the original driver
+   * into an unbounded drain of a drained FIFO; guarded by the count field
+   * instead, it read "empty" while two received bytes sat in the FIFO, and
+   * those bytes only surfaced when the next line's CR arrived.  Both
+   * failures were watched live on hardware (fs=0x003a0000: rd_ready set,
+   * empty set, count zero -- with data demonstrably present).
+   *
+   * rd_ready tracked the truth through all of it, as does its transmit twin
+   * wr_ready, which this driver has trusted from the start without a single
+   * glitch.
+   */
+
+  return (bk7258_fifo_status_stable(priv) & UART_FIFO_STATUS_RD_READY) != 0;
 }
 
 /****************************************************************************
@@ -580,7 +717,7 @@ static bool bk7258_txready(struct uart_dev_s *dev)
 {
   struct bk7258_dev_s *priv = dev->priv;
 
-  return (bk7258_serialin(priv, BK7258_UART_FIFO_STATUS_OFFSET) &
+  return (bk7258_fifo_status_stable(priv) &
           UART_FIFO_STATUS_WR_READY) != 0;
 }
 
@@ -658,3 +795,93 @@ void up_putc(int ch)
 }
 
 #endif /* USE_SERIALDRIVER */
+
+/****************************************************************************
+ * Name: bk7258_console_monitor
+ *
+ * Description:
+ *   Print the console's interrupt-chain state every few seconds, through
+ *   up_putc rather than through the serial driver, so it keeps reporting
+ *   when the driver is exactly what broke.
+ *
+ *   This exists because the port's remaining bug is an RX path that dies
+ *   after the first couple of received characters while everything else --
+ *   SysTick, the scheduler, transmit -- stays healthy.  A system that
+ *   healthy keeps feeding the watchdog, so the failure defeats both the
+ *   watchdog and the `reboot` command (which would need working RX to be
+ *   typed).  The monitor closes that hole two ways: it shows which link of
+ *   the chain went dark (UART int_status vs NVIC pending vs enables), and
+ *   if the black-box sequence freezes while the hardware says receive data
+ *   is pending, it concludes the RX path is dead, dumps everything, and
+ *   reboots through the watchdog -- making even this half-dead state
+ *   self-recovering.
+ *
+ ****************************************************************************/
+
+static int bk7258_console_monitor(int argc, char **argv)
+{
+  struct bk7258_dev_s *priv = &g_uart0priv;
+  volatile uint32_t *bb = BB_BASE;
+  uint32_t last_seq = 0;
+  int frozen = 0;
+
+  for (; ; )
+    {
+      uint32_t seq = (bb[0] == 0xb1acb0c5) ? bb[1] : 0;
+      uint32_t ie  = bk7258_serialin(priv, BK7258_UART_INT_ENABLE_OFFSET);
+      uint32_t is  = bk7258_serialin(priv, BK7258_UART_INT_STATUS_OFFSET);
+      uint32_t fs  = bk7258_serialin(priv, BK7258_UART_FIFO_STATUS_OFFSET);
+      uint32_t en  = getreg32(0xe000e100);      /* NVIC ISER0 */
+      uint32_t pnd = getreg32(0xe000e200);      /* NVIC ISPR0 */
+      uint32_t act = getreg32(0xe000e300);      /* NVIC IABR0 */
+      uint32_t mtx = getreg32(BK7258_SYS_CPU0_INT_EN(4));
+      bool rx_pending = (fs & UART_FIFO_STATUS_RD_READY) != 0 &&
+                        (ie & UART_INT_RX_ALL) != 0;
+
+      /* Stay quiet while healthy: a diagnostic that prints into the middle
+       * of whatever the user is typing is itself a console defect.  Speak
+       * only once something looks wrong.
+       */
+
+      if (frozen > 0)
+        {
+          _alert("conmon seq=%lu im=%02lx ie=%02lx is=%02lx fs=%08lx "
+                 "nvic e/p/a=%d/%d/%d mtx=%d froz=%d\n",
+                 (unsigned long)seq, (unsigned long)priv->im,
+                 (unsigned long)ie, (unsigned long)is, (unsigned long)fs,
+                 (int)((en >> 4) & 1), (int)((pnd >> 4) & 1),
+                 (int)((act >> 4) & 1), (int)((mtx >> 4) & 1), frozen);
+        }
+
+      if (seq == last_seq && rx_pending)
+        {
+          frozen++;
+        }
+      else
+        {
+          frozen = 0;
+        }
+
+      last_seq = seq;
+
+      if (frozen >= 3)
+        {
+          _alert("conmon: RX interrupt chain dead with data pending; "
+                 "rebooting\n");
+          bk7258_wdt_reboot();
+        }
+
+      nxsig_usleep(3000000);
+    }
+
+  return 0;
+}
+
+/****************************************************************************
+ * Name: bk7258_serial_monitor_start
+ ****************************************************************************/
+
+void bk7258_serial_monitor_start(void)
+{
+  kthread_create("conmon", 100, 2048, bk7258_console_monitor, NULL);
+}
