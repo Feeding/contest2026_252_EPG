@@ -42,6 +42,10 @@
 #ifdef CONFIG_VIDEO_FB
 #  include <nuttx/video/fb.h>
 #endif
+#ifdef CONFIG_MMCSD
+#  include <nuttx/sdio.h>
+#  include <nuttx/mmcsd.h>
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -160,6 +164,19 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: bk7258_gpiodev_initialize: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_MMCSD
+    {
+      extern struct sdio_dev_s *bk7258_sdio_initialize(void);
+      struct sdio_dev_s *sdio = bk7258_sdio_initialize();
+
+      ret = mmcsd_slotinitialize(0, sdio);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: mmcsd_slotinitialize: %d\n", ret);
+        }
     }
 #endif
 
