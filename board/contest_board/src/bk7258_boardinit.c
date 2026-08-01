@@ -33,6 +33,7 @@
 #include "bk7258_gpio.h"
 
 #include <nuttx/kmalloc.h>
+#include <syslog.h>
 
 #include "arm_internal.h"
 
@@ -92,6 +93,29 @@ void board_late_initialize(void)
    */
 
   kumm_addregion((void *)0x28050000, 0x280a0000 - 0x28050000);
+#endif
+
+#if CONFIG_MM_REGIONS > 2
+  /* 16 MB APS128XXO_OB9 PSRAM at 0x60000000.  Init verifies the die ID
+   * and a spread-out pattern test before the memory is trusted with heap
+   * duty; on any failure the region is simply not added.
+   */
+
+    {
+      extern size_t bk7258_psram_init(void);
+      size_t psize = bk7258_psram_init();
+
+      if (psize > 0)
+        {
+          kumm_addregion((void *)0x60000000, psize);
+          syslog(LOG_INFO, "psram: %u MB online\n",
+                 (unsigned)(psize >> 20));
+        }
+      else
+        {
+          syslog(LOG_WARNING, "psram: init failed, running without\n");
+        }
+    }
 #endif
 
   bk7258_serial_monitor_start();
