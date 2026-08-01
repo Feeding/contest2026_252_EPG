@@ -141,14 +141,17 @@ static int bk7258_qspi_op(struct bk7258_qspi_dev_s *priv,
   size_t ndata = nbytes - 1;
   size_t i;
 
-  /* Scrub FIFO and stale status. */
+  /* Clear stale completion status. */
 
-  qspi_putreg(priv, QSPI_RST_FIFO_OFFSET, QSPI_RST_SW_FIFO);
-  qspi_putreg(priv, QSPI_RST_FIFO_OFFSET, 0);
   qspi_putreg(priv, QSPI_STATUS_CLR_OFFSET, 0xff);
   qspi_putreg(priv, QSPI_STATUS_CLR_OFFSET, 0);
 
-  /* Data first: the FIFO must hold everything before the engine starts. */
+  /* Data first: words 0x40-0x7c are a 61-word buffer RAM, one word per
+   * address -- NOT a single-port FIFO.  Writing every word to 0x40 only
+   * ever fills slot 0, and the engine then streams whatever the rest of
+   * the buffer happens to hold; that bug cost both panels a whole flash
+   * cycle of darkness.
+   */
 
   for (i = 0; i < ndata; i += 4)
     {
@@ -169,17 +172,19 @@ static int bk7258_qspi_op(struct bk7258_qspi_dev_s *priv,
           word |= (uint32_t)buf[4 + i] << 24;
         }
 
-      qspi_putreg(priv, QSPI_FIFO_OFFSET, word);
+      qspi_putreg(priv, QSPI_FIFO_OFFSET + i, word);
     }
 
-  /* Command block: one 1-wire command byte, then the data phase. */
+  /* Command block: one 1-wire command byte, then a plain write data phase.
+   * The vendor LCD driver leaves dummy_mode at 0 for writes; extra dummy
+   * cycles between command and data would shear every data byte.
+   */
 
   qspi_putreg(priv, QSPI_CMD_C_L_OFFSET, 0);
   qspi_putreg(priv, QSPI_CMD_C_H_OFFSET, buf[0]);
   qspi_putreg(priv, QSPI_CMD_C_CFG1_OFFSET, QSPI_CFG1_ONE_CMD_BYTE);
   qspi_putreg(priv, QSPI_CMD_C_CFG2_OFFSET,
               QSPI_CFG2_DATA_LEN(ndata) |
-              (ndata > 0 ? QSPI_CFG2_DUMMY_MODE_WR : 0) |
               QSPI_CFG2_START);
 
   budget = 200000;
