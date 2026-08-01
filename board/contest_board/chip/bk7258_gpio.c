@@ -29,6 +29,10 @@
 
 #include "arm_internal.h"
 #include "bk7258_gpio.h"
+#include "chip.h"
+
+#include <nuttx/irq.h>
+#include <assert.h>
 
 /****************************************************************************
  * Public Functions
@@ -160,4 +164,93 @@ bool bk7258_gpio_read(int pin)
     }
 
   return (getreg32(BK7258_GPIO_CFG(pin)) & GPIO_CFG_INPUT) != 0;
+}
+
+/****************************************************************************
+ * GPIO interrupts
+ *
+ * Every pin interrupt arrives on one NVIC line.  The latched status lives
+ * in two write-1-to-clear words (REG_0x40/0x41 of the always-on GPIO
+ * block); the dispatcher reads them, clears exactly what it saw, and calls
+ * the handlers for the set bits.  Clearing before dispatch means an edge
+ * that lands during a handler latches again and re-enters -- the same
+ * clear-then-drain discipline the UART interrupt settled on.
+ ****************************************************************************/
+
+static struct
+{
+  void (*handler)(int pin, void *arg);
+  void *arg;
+} g_gpio_isr[BK7258_NGPIOS];
+
+static int bk7258_gpio_dispatch(int irq, void *context, void *arg)
+{
+  uint32_t lo = getreg32(BK7258_GPIO_INTST_0_31);
+  uint32_t hi = getreg32(BK7258_GPIO_INTST_32_55);
+  int pin;
+
+  if (lo != 0)
+    {
+      putreg32(lo, BK7258_GPIO_INTST_0_31);
+    }
+
+  if (hi != 0)
+    {
+      putreg32(hi, BK7258_GPIO_INTST_32_55);
+    }
+
+  for (pin = 0; pin < BK7258_NGPIOS; pin++)
+    {
+      bool hit = (pin < 32) ? ((lo >> pin) & 1) : ((hi >> (pin - 32)) & 1);
+
+      if (hit && g_gpio_isr[pin].handler != NULL)
+        {
+          g_gpio_isr[pin].handler(pin, g_gpio_isr[pin].arg);
+        }
+    }
+
+  return OK;
+}
+
+/****************************************************************************
+ * Name: bk7258_gpio_setint
+ ****************************************************************************/
+
+int bk7258_gpio_setint(int pin, uint8_t type,
+                       void (*handler)(int pin, void *arg), void *arg)
+{
+  static bool dispatcher_ready;
+  irqstate_t flags;
+  uint32_t regval;
+
+  if (pin < 0 || pin >= BK7258_NGPIOS)
+    {
+      return -EINVAL;
+    }
+
+  flags = up_irq_save();
+
+  if (!dispatcher_ready)
+    {
+      irq_attach(BK7258_IRQ_GPIO, bk7258_gpio_dispatch, NULL);
+      up_enable_irq(BK7258_IRQ_GPIO);
+      dispatcher_ready = true;
+    }
+
+  g_gpio_isr[pin].handler = handler;
+  g_gpio_isr[pin].arg     = arg;
+
+  regval  = getreg32(BK7258_GPIO_CFG(pin));
+  regval &= ~(GPIO_CFG_INT_TYPE_MASK | GPIO_CFG_INT_EN);
+
+  if (handler != NULL)
+    {
+      regval |= ((uint32_t)type << GPIO_CFG_INT_TYPE_SHIFT) & GPIO_CFG_INT_TYPE_MASK;
+      regval |= GPIO_CFG_INT_EN;
+    }
+
+  putreg32(regval | GPIO_CFG_INT_CLEAR, BK7258_GPIO_CFG(pin));
+
+  up_irq_restore(flags);
+  return OK;
 }

@@ -58,4 +58,34 @@
 
 #define BOARD_CONSOLE_UART      0
 
+/* LEDs **********************************************************************/
+
+/* The bi-colour LED, straight from the vendor firmware for this exact board
+ * (led_blink.h): red on GPIO40, green on GPIO41, push-pull, driven high to
+ * light.  The power-on default mux table calls these pins LCD_G4/G3; that is
+ * template residue -- this board runs twin SPI panels and the vendor's own
+ * LED driver reclaims the pads at runtime, as does this port's GPIO layer.
+ */
+
+#define BOARD_LED_RED       0
+#define BOARD_LED_GREEN     1
+#define BOARD_NLEDS         2
+
+/* Buttons *******************************************************************/
+
+/* Three side keys, active low with the internal pull-up, mapped by the
+ * vendor's key table (key_app_config.h) and the board manual: S1 volume-up
+ * on GPIO13, S2 power on GPIO12 (also the deep-sleep wake source), S3
+ * volume-down on GPIO8.
+ */
+
+#define BUTTON_S1           0
+#define BUTTON_S2           1
+#define BUTTON_S3           2
+#define NUM_BUTTONS         3
+
+#define BUTTON_S1_BIT       (1 << BUTTON_S1)
+#define BUTTON_S2_BIT       (1 << BUTTON_S2)
+#define BUTTON_S3_BIT       (1 << BUTTON_S3)
+
 #endif /* __BOARD_CONTEST_BOARD_INCLUDE_BOARD_H */

@@ -30,6 +30,13 @@
 
 #include <nuttx/board.h>
 
+#ifdef CONFIG_USERLED_LOWER
+#  include <nuttx/leds/userled.h>
+#endif
+#ifdef CONFIG_INPUT_BUTTONS_LOWER
+#  include <nuttx/input/buttons.h>
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -45,13 +52,41 @@
 
 int board_app_initialize(uintptr_t arg)
 {
-#ifdef CONFIG_FS_PROCFS
   int ret;
 
+  UNUSED(ret);
+
+#ifdef CONFIG_FS_PROCFS
   ret = nx_mount(NULL, "/proc", "procfs", 0, NULL);
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: Failed to mount procfs at /proc: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_USERLED_LOWER
+  ret = userled_lower_initialize("/dev/userleds");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: userled_lower_initialize: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_INPUT_BUTTONS_LOWER
+  ret = btn_lower_initialize("/dev/buttons");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: btn_lower_initialize: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_DEV_GPIO
+  extern int bk7258_gpiodev_initialize(void);
+
+  ret = bk7258_gpiodev_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: bk7258_gpiodev_initialize: %d\n", ret);
     }
 #endif
 
