@@ -22,7 +22,7 @@
 
 set(SRCS bk7258_start.c bk7258_irq.c bk7258_lowputc.c bk7258_allocateheap.c
          bk7258_gpio.c bk7258_clockconfig.c bk7258_timerisr.c
-    bk7258_idle.c bk7258_wdt.c)
+    bk7258_idle.c bk7258_wdt.c bk7258_psram.c)
 
 if(CONFIG_BK7258_I2C1)
   list(APPEND SRCS bk7258_i2c.c)
