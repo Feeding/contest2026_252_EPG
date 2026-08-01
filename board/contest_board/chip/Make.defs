@@ -34,6 +34,9 @@ CHIP_CSRCS += bk7258_wdt.c
 ifeq ($(CONFIG_BK7258_I2C1),y)
 CHIP_CSRCS += bk7258_i2c.c
 endif
+ifeq ($(CONFIG_BK7258_SPI1),y)
+CHIP_CSRCS += bk7258_spi.c
+endif
 
 ifeq ($(CONFIG_BK7258_UART0),y)
 CHIP_CSRCS += bk7258_serial.c

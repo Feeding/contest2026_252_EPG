@@ -39,6 +39,9 @@
 #ifdef CONFIG_BK7258_I2C1
 #  include <nuttx/i2c/i2c_master.h>
 #endif
+#ifdef CONFIG_VIDEO_FB
+#  include <nuttx/video/fb.h>
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -133,6 +136,14 @@ int board_app_initialize(uintptr_t arg)
               syslog(LOG_ERR, "ERROR: i2c_register(bitbang): %d\n", ret);
             }
         }
+    }
+#endif
+
+#ifdef CONFIG_VIDEO_FB
+  ret = fb_register(0, 0);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: fb_register: %d\n", ret);
     }
 #endif
 

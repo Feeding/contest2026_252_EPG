@@ -32,6 +32,8 @@
 #include "bk7258_wdt.h"
 #include "bk7258_gpio.h"
 
+#include <nuttx/kmalloc.h>
+
 #include "arm_internal.h"
 
 /****************************************************************************
@@ -80,6 +82,17 @@ void board_late_initialize(void)
 
   bk7258_gpio_config(52, true, false, false);
   bk7258_gpio_write(52, true);
+
+#if CONFIG_MM_REGIONS > 1
+  /* Fold the upper SRAM banks into the heap.  The linked region stops at
+   * 0x28040000 because early boot cannot keep .data/.bss any higher
+   * (measured; see the link script), but at runtime SRAM4/5 have carried
+   * stacks and test patterns through every probe.  0x28040000-0x28050000
+   * stays out: the black-box recorder lives at 0x28048000.
+   */
+
+  kumm_addregion((void *)0x28050000, 0x280a0000 - 0x28050000);
+#endif
 
   bk7258_serial_monitor_start();
 
