@@ -72,6 +72,15 @@ config BK7258_I2C1
 		this bus reaches the SC7A20 accelerometer; the pins double as the
 		UART-expansion header pads.
 
+config BK7258_SPI1
+	bool "SPI1 (GPIO2 SCK / GPIO3 CSN / GPIO4 MOSI)"
+	default n
+	select SPI
+	---help---
+		Polled transmit-only SPI master on the SPI1 block.  These pins are
+		screen 1 of the twin GC9D01 panels on the Agora ConvoAI Kit R1;
+		GPIO5, nominally MISO, is the panel's D/C line.
+
 endmenu # BK7258 Peripheral Support
 
 config BK7258_EARLY_MARKERS

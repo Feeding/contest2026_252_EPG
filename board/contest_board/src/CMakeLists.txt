@@ -43,6 +43,10 @@ if(CONFIG_I2C_BITBANG)
   list(APPEND SRCS bk7258_i2c_bitbang.c)
 endif()
 
+if(CONFIG_LCD)
+  list(APPEND SRCS bk7258_gc9d01.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR})
