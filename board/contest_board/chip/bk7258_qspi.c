@@ -61,6 +61,7 @@
  */
 
 #define BK7258_QSPI0_BASE       0x46040000ul
+#define BK7258_QSPI1_BASE       0x46060000ul
 
 #define QSPI_GLB_CTRL_OFFSET    (0x02 << 2)
 #define QSPI_CMD_C_L_OFFSET     (0x10 << 2)
@@ -274,11 +275,18 @@ static const struct spi_ops_s g_qspi_ops =
   .exchange     = qspi_exchange,
 };
 
-static struct bk7258_qspi_dev_s g_qspi0_dev =
+static struct bk7258_qspi_dev_s g_qspi_devs[2] =
 {
-  .dev  = { .ops = &g_qspi_ops },
-  .base = BK7258_QSPI0_BASE,
-  .lock = NXMUTEX_INITIALIZER,
+  {
+    .dev  = { .ops = &g_qspi_ops },
+    .base = BK7258_QSPI0_BASE,
+    .lock = NXMUTEX_INITIALIZER,
+  },
+  {
+    .dev  = { .ops = &g_qspi_ops },
+    .base = BK7258_QSPI1_BASE,
+    .lock = NXMUTEX_INITIALIZER,
+  },
 };
 
 /****************************************************************************
@@ -295,20 +303,37 @@ static struct bk7258_qspi_dev_s g_qspi0_dev =
  *
  ****************************************************************************/
 
-struct spi_dev_s *bk7258_qspibus_initialize(void)
+struct spi_dev_s *bk7258_qspibus_initialize(int port)
 {
-  struct bk7258_qspi_dev_s *priv = &g_qspi0_dev;
+  struct bk7258_qspi_dev_s *priv;
   uint32_t id;
 
-  /* Clock: qspi0_cken is bit 20 of the device clock-enable word; the
-   * source select/divider live in clkdiv mode2 (bits 6-9 divider, bit 10
-   * select, 0 = 320 MHz).  Divider 15 then a controller clk_rate of 2
-   * keeps SCK comfortably inside the panel's rating.
+  /* Per-unit plumbing.  QSPI0: cken bit 20, clock fields in clkdiv mode2
+   * (word 0x09); pins GPIO22/23/24, alternate 3.  QSPI1: cken bit 21,
+   * clock fields in the 26M/WDT divider word (0x0a); pins GPIO2/3/4,
+   * alternate 6 -- the same pads the GSPI SPI1 block reaches at alternate
+   * 0, which stays available as a fallback.  Both clock recipes: 320 MHz
+   * source (select bit 10 = 0), source divider 15, controller rate 2.
    */
 
-  modifyreg32(BK7258_SYS_CPU_DEVICE_CKEN, 0, 1 << 20);
-  modifyreg32(BK7258_SYS_BASE + (0x09 << 2),
-              (0xf << 6) | (1 << 10), (0xf << 6));
+  if (port == 0)
+    {
+      priv = &g_qspi_devs[0];
+      modifyreg32(BK7258_SYS_CPU_DEVICE_CKEN, 0, 1 << 20);
+      modifyreg32(BK7258_SYS_BASE + (0x09 << 2),
+                  (0xf << 6) | (1 << 10), (0xf << 6));
+    }
+  else if (port == 1)
+    {
+      priv = &g_qspi_devs[1];
+      modifyreg32(BK7258_SYS_CPU_DEVICE_CKEN, 0, 1 << 21);
+      modifyreg32(BK7258_SYS_BASE + (0x0a << 2),
+                  (0xf << 6) | (1 << 10), (0xf << 6));
+    }
+  else
+    {
+      return NULL;
+    }
 
   /* Family convention: soft_reset is a level, 1 = released. */
 
@@ -325,13 +350,22 @@ struct spi_dev_s *bk7258_qspibus_initialize(void)
   qspi_putreg(priv, QSPI_CONFIG_OFFSET,
               QSPI_CONFIG_EN | QSPI_CONFIG_CLK_RATE(2));
 
-  /* Only CLK/CSN/IO0 go to the controller (alternate index 3); IO1-IO3
-   * stay with their day jobs (backlight, input, camera clock).
+  /* Only CLK/CSN/IO0 go to the controller; the IO1-IO3 pads of both units
+   * have board-assigned day jobs.
    */
 
-  bk7258_gpio_setaf(22, 3, false);
-  bk7258_gpio_setaf(23, 3, false);
-  bk7258_gpio_setaf(24, 3, false);
+  if (port == 0)
+    {
+      bk7258_gpio_setaf(22, 3, false);
+      bk7258_gpio_setaf(23, 3, false);
+      bk7258_gpio_setaf(24, 3, false);
+    }
+  else
+    {
+      bk7258_gpio_setaf(2, 6, false);
+      bk7258_gpio_setaf(3, 6, false);
+      bk7258_gpio_setaf(4, 6, false);
+    }
 
   return &priv->dev;
 }

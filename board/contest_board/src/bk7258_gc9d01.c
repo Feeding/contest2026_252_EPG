@@ -285,6 +285,47 @@ static int gc9d01_putrun(struct lcd_dev_s *dev, fb_coord_t row,
   return OK;
 }
 
+/****************************************************************************
+ * Name: gc9d01_putarea
+ *
+ * Description:
+ *   Blast a whole rectangle in one panel transaction: window and RAMWR go
+ *   out once, then nothing but pixel bytes.  The per-row path pays five
+ *   small command transfers per line -- 160x per full screen -- which is
+ *   what made the first bring-up visibly crawl.
+ *
+ ****************************************************************************/
+
+static int gc9d01_putarea(struct lcd_dev_s *dev, fb_coord_t row_start,
+                          fb_coord_t row_end, fb_coord_t col_start,
+                          fb_coord_t col_end, const uint8_t *buffer,
+                          fb_coord_t stride)
+{
+  struct gc9d01_dev_s *priv = (struct gc9d01_dev_s *)dev;
+  fb_coord_t row;
+  size_t width = col_end - col_start + 1;
+  const uint16_t *src;
+  size_t i;
+
+  gc9d01_setwindow(priv, col_start, row_start, col_end, row_end);
+  bk7258_gpio_write(priv->dc_pin, true);
+
+  for (row = row_start; row <= row_end; row++)
+    {
+      src = (const uint16_t *)(buffer + (row - row_start) * stride);
+
+      for (i = 0; i < width; i++)
+        {
+          priv->runbuf[2 * i]     = src[i] >> 8;
+          priv->runbuf[2 * i + 1] = src[i] & 0xff;
+        }
+
+      SPI_SNDBLOCK(priv->spi, priv->runbuf, width * 2);
+    }
+
+  return OK;
+}
+
 static int gc9d01_getrun(struct lcd_dev_s *dev, fb_coord_t row,
                          fb_coord_t col, uint8_t *buffer, size_t npixels)
 {
@@ -307,8 +348,9 @@ static int gc9d01_getplaneinfo(struct lcd_dev_s *dev, unsigned int planeno,
   struct gc9d01_dev_s *priv = (struct gc9d01_dev_s *)dev;
 
   memset(pinfo, 0, sizeof(*pinfo));
-  pinfo->putrun = gc9d01_putrun;
-  pinfo->getrun = gc9d01_getrun;
+  pinfo->putrun  = gc9d01_putrun;
+  pinfo->putarea = gc9d01_putarea;
+  pinfo->getrun  = gc9d01_getrun;
   pinfo->buffer = priv->runbuf;
   pinfo->bpp    = 16;
   pinfo->dev    = dev;
@@ -358,20 +400,26 @@ int board_lcd_initialize(void)
 {
   extern struct spi_dev_s *bk7258_spibus_initialize(int port);
   extern struct spi_dev_s *bk7258_swspi_initialize(void);
-  extern struct spi_dev_s *bk7258_qspibus_initialize(void);
+  extern struct spi_dev_s *bk7258_qspibus_initialize(int port);
   const struct gc9d01_cmd_s *c;
   struct gc9d01_dev_s *priv;
   unsigned int i;
   int panel;
 
-  g_gc9d01[0].spi = bk7258_spibus_initialize(1);
-
-  /* The left eye prefers the QSPI0 hardware path and falls back to the
-   * bit-banged master if the block does not answer, so a QSPI surprise
-   * costs speed, not the eye.
+  /* Both eyes prefer their QSPI unit -- the vendor's own architecture --
+   * and each has a fallback that keeps the eye lit if the unit does not
+   * answer: the GSPI block for the right eye (functional but with a
+   * still-undiagnosed slow clock), the bit-banged master for the left.
    */
 
-  g_gc9d01[1].spi = bk7258_qspibus_initialize();
+  g_gc9d01[0].spi = bk7258_qspibus_initialize(1);
+
+  if (g_gc9d01[0].spi == NULL)
+    {
+      g_gc9d01[0].spi = bk7258_spibus_initialize(1);
+    }
+
+  g_gc9d01[1].spi = bk7258_qspibus_initialize(0);
 
   if (g_gc9d01[1].spi == NULL)
     {
