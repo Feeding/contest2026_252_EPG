@@ -1,0 +1,12 @@
+config CONTEST_EYES
+	bool "Contest board robot eyes animation"
+	default n
+	depends on VIDEO_FB
+	---help---
+		Procedural robot-eye animation ("eyes" NSH command) for the two
+		GC9D01 panels: gaze wander, blinking, dirty-rectangle updates.
+
+config CONTEST_EYES_STACKSIZE
+	int "eyes stack size"
+	default 4096
+	depends on CONTEST_EYES
