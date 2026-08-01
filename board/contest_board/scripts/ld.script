@@ -67,6 +67,12 @@ MEMORY
    */
 
   sram  (rwx) : ORIGIN = 0x28020000, LENGTH = 128K
+
+  /* Top of the camera carve (0x28098000+0x5000 is the YUV line buffer);
+   * the remaining 12K hosts SRAM-resident hot code (TJpgDec).
+   */
+
+  sramhi (rwx) : ORIGIN = 0x2809d000, LENGTH = 12K
 }
 
 OUTPUT_ARCH(arm)
@@ -96,10 +102,10 @@ SECTIONS
         KEEP(*(.vectors))
 
         . = ALIGN(4);
-        *(.text .text.*)
+        EXCLUDE_FILE(*tjpgd*) *(.text .text.*)
         *(.fixup)
         *(.gnu.warning)
-        *(.rodata .rodata.*)
+        EXCLUDE_FILE(*tjpgd*) *(.rodata .rodata.*)
         *(.gnu.linkonce.t.*)
         *(.glue_7)
         *(.glue_7t)
@@ -144,7 +150,10 @@ SECTIONS
         *(.ram_vectors)
     } > sram
 
+
+
     .data : {
+
         _sdata = ABSOLUTE(.);
         *(.data .data.*)
         *(.gnu.linkonce.d.*)
@@ -172,6 +181,21 @@ SECTIONS
         . = ALIGN(4);
         _edata = ABSOLUTE(.);
     } > sram AT > flash
+
+    /* TJpgDec executes from SRAM: its working set thrashes the small
+     * ICache and XIP fetch latency measured 33x slower than the
+     * arithmetic allows.  VMA in the sramhi carve keeps the fragile
+     * SRAM2 layout untouched; boardinit copies it in at boot.
+     */
+
+    .sramfunc : ALIGN(4) {
+        _ssramfunc = ABSOLUTE(.);
+        *tjpgd*(.text .text.* .rodata .rodata.*)
+        . = ALIGN(4);
+        _esramfunc = ABSOLUTE(.);
+    } > sramhi AT > flash
+
+    _fsramfunc = LOADADDR(.sramfunc);
 
     /* Both bounds are 8-byte aligned, not 4.
      *

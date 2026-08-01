@@ -137,10 +137,19 @@ void bk7258_uart_clockenable(int uart)
 
 void bk7258_clockconfig(void)
 {
-  /* The core clock, flash controller and PSRAM are already running by the
-   * time we get here: the boot ROM and the Beken second-stage bootloader
-   * must configure them in order to fetch this image over XIP.  Enabling
-   * the clocks for the UARTs we actually use is all that is needed.
+  /* The bootloader leaves the core at 480MHz/4 = 120 MHz (reg0x08
+   * cksel_core=3, clkdiv_core=3) -- discovered only after JPEG decode
+   * clocked in at 1.9 s/frame.  The vendor runs CPU0 at 240 MHz, so
+   * take their divider: 480/2.  BOARD_CPU_FREQUENCY and LOOPSPERMSEC
+   * must agree with this value.
+   */
+
+  modifyreg32(BK7258_SYS_BASE + (0x08 << 2), 0xf, 1);
+
+  /* Flash controller and PSRAM are already running by the time we get
+   * here: the boot ROM and the Beken second-stage bootloader configure
+   * them in order to fetch this image over XIP.  Enabling the clocks
+   * for the UARTs we actually use is all that remains.
    */
 
 #ifdef CONFIG_BK7258_UART0

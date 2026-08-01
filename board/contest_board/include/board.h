@@ -41,7 +41,7 @@
  */
 
 #define BOARD_XTAL_FREQUENCY    26000000
-#define BOARD_CPU_FREQUENCY     120000000
+#define BOARD_CPU_FREQUENCY     240000000
 
 /* up_udelay() calibration.  This is a starting estimate for a 120 MHz core;
  * refine it with apps/examples/calib_udelay if precise delays are needed.
