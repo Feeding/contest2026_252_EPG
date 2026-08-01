@@ -36,6 +36,9 @@
 #ifdef CONFIG_INPUT_BUTTONS_LOWER
 #  include <nuttx/input/buttons.h>
 #endif
+#ifdef CONFIG_BK7258_I2C1
+#  include <nuttx/i2c/i2c_master.h>
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -77,6 +80,59 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: btn_lower_initialize: %d\n", ret);
+    }
+#endif
+
+#if defined(CONFIG_BK7258_I2C1) && defined(CONFIG_I2C_DRIVER)
+    {
+      extern struct i2c_master_s *bk7258_i2cbus_initialize(int port);
+      extern void bk7258_gpio_config(int pin, bool output, bool pullup,
+                                     bool pulldown);
+      extern void bk7258_gpio_write(int pin, bool value);
+      struct i2c_master_s *i2c;
+      int port;
+
+      /* The camera's SCCB interface only answers with the sensor powered:
+       * GPIO49 gates its supply (vendor: CONFIG_CAMERA_CTRL_POWER_GPIO_ID).
+       */
+
+      bk7258_gpio_config(49, true, false, false);
+      bk7258_gpio_write(49, true);
+
+      for (port = 0; port <= 1; port++)
+        {
+          i2c = bk7258_i2cbus_initialize(port);
+
+          if (i2c == NULL)
+            {
+              syslog(LOG_ERR, "ERROR: i2c port %d init failed\n", port);
+            }
+          else
+            {
+              ret = i2c_register(i2c, port);
+              if (ret < 0)
+                {
+                  syslog(LOG_ERR, "ERROR: i2c_register(%d): %d\n",
+                         port, ret);
+                }
+            }
+        }
+    }
+#endif
+
+#if defined(CONFIG_I2C_BITBANG) && defined(CONFIG_I2C_DRIVER)
+    {
+      extern struct i2c_master_s *bk7258_i2c_bitbang_initialize(void);
+      struct i2c_master_s *i2c = bk7258_i2c_bitbang_initialize();
+
+      if (i2c != NULL)
+        {
+          ret = i2c_register(i2c, 2);
+          if (ret < 0)
+            {
+              syslog(LOG_ERR, "ERROR: i2c_register(bitbang): %d\n", ret);
+            }
+        }
     }
 #endif
 
