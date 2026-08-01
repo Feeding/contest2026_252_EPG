@@ -4,11 +4,10 @@
  * Single-shot JPEG capture from the GC2145 DVP sensor.  The pipeline is
  * three blocks: YUV_BUF (0x48020000) slices the DVP stream into an SRAM
  * ping-pong line buffer, the JPEG encoder (0x48000000) eats the slices,
- * and the CPU drains the encoder's stream FIFO into the caller's buffer
- * (the GDMA block bus-faults on CPU0 -- unresolved protection gating --
- * but bitrate control caps frames at 35 KB, well within polling reach).
- * The encoder has no output-address register of its own, and software
- * must load the quantization tables (no hardware defaults).
+ * and GDMA channel 8 drains the encoder's stream FIFO into the caller's
+ * buffer -- through the 0x55020000 secure alias; the documented base
+ * bus-faults CPU0.  The encoder has no output-address register of its
+ * own, and software must load the quantization tables (no defaults).
  *
  * Strategy for a clean single frame: configure everything, start the
  * SENSOR first and let auto-exposure converge, and only then arm DMA +
@@ -59,10 +58,29 @@
 #define YUV_REG_EMRBASE       (YUV_BASE + 0x30)
 #define YUV_REG_RESIZE        (YUV_BASE + 0x34)
 
-/* JPEG stream FIFO status (REG_0x8): bit26 = stream fifo empty */
+/* GDMA: the plain 0x45020000 base bus-faults CPU0; the block answers
+ * at the +0x10000000 alias (device id reads "GDMA").  Channel 8 is the
+ * SDK's fixed JPEG lane.
+ */
 
-#define JPEG_REG_FIFOSTAT     (JPEG_BASE + 0x20)
-#define JPEG_FIFO_EMPTY       (1u << 26)
+#define GDMA_BASE             0x55020000ul
+#define DMA_REG_GLB_RESET     (GDMA_BASE + 0x08)
+#define DMA_REG_SECURE        (GDMA_BASE + 0x10)
+#define DMA_REG_PRIV          (GDMA_BASE + 0x14)
+/* Channel 0: secure_attr's power-on 0xff puts channels 0-7 in OUR
+ * (secure) hands and 8-11 out of reach -- channel-8 writes are silent
+ * no-ops.  The SDK's "channel 8 for JPEG" is its software allocation
+ * policy, not a hardware binding.
+ */
+
+#define DMA_CH8_CTRL          (GDMA_BASE + 0x040)
+#define DMA_CH8_DST           (GDMA_BASE + 0x044)
+#define DMA_CH8_SRC           (GDMA_BASE + 0x048)
+#define DMA_CH8_LOOP_END      (GDMA_BASE + 0x04c)
+#define DMA_CH8_LOOP_START    (GDMA_BASE + 0x050)
+#define DMA_CH8_MUX           (GDMA_BASE + 0x05c)
+#define DMA_CH8_WRPTR         (GDMA_BASE + 0x06c)
+#define DMA_CH8_STAT          (GDMA_BASE + 0x070)
 
 /* Frame geometry: VGA */
 
@@ -186,6 +204,40 @@ static void cam_pins_setup(void)
     }
 }
 
+static void cam_dma_arm(uintptr_t dst)
+{
+  /* The block powers up IN reset (soft_reset reads 0): channel
+   * registers accept configuration but the engine refuses the enable
+   * bit.  Release it exactly like dma_ll_init: whole word 0, then
+   * soft_reset=1.  (The first attempt's crash came from the channel-8 /
+   * secure_attr combination, not from this write.)
+   */
+
+  if ((getreg32(DMA_REG_GLB_RESET) & 1u) == 0)
+    {
+      putreg32(0, DMA_REG_GLB_RESET);
+      putreg32(1, DMA_REG_GLB_RESET);
+    }
+
+
+  putreg32(0, DMA_CH8_CTRL);
+  putreg32(JPEG_REG_FIFO, DMA_CH8_SRC);
+  putreg32(dst, DMA_CH8_DST);
+  putreg32(dst, DMA_CH8_LOOP_START);
+  putreg32(dst + 0x10000, DMA_CH8_LOOP_END);
+  putreg32(0x0c300019, DMA_CH8_MUX);          /* JPEG req, SEC, INC16 */
+
+  /* Repeat mode, exactly the SDK's JPEG recipe: only repeat transfers
+   * are paced by the peripheral request line -- a single-shot channel
+   * free-runs and "finishes" before the encoder emits a byte (the
+   * corpse of attempt two).  5 KB blocks looping inside a 64 KB window.
+   */
+
+  putreg32(((uint32_t)(5120 - 1) << 16) | (1u << 11) | (1u << 9) |
+           (2u << 6) | (2u << 4) | (1u << 3) | 1u, DMA_CH8_CTRL);
+
+}
+
 static void cam_engine_setup(void)
 {
   int i;
@@ -301,79 +353,62 @@ int bk7258_camera_snap(uint8_t *buf, size_t maxlen)
       g_cam_ready = true;
     }
 
-  /* Clean slate.  The GDMA block bus-faults on CPU0 (unresolved
-   * protection gating), so the CPU itself drains the stream FIFO --
-   * bitrate control caps a frame at 35 KB while a tight polling loop
-   * can move tens of MB/s, a comfortable 50x margin.
+  /* Clean slate, arm the DMA lane first, then the encoder: the DMA
+   * request line paces reads to whole ready words, which a CPU polling
+   * the empty flag cannot do (half-filled words read as 0xff garbage --
+   * the corpse of the first corrupted frame).
    */
 
   putreg32(getreg32(JPEG_REG_STATUS), JPEG_REG_STATUS);
   putreg32(getreg32(YUV_REG_STATUS), YUV_REG_STATUS);
+  memset(buf, 0, 64);
+
+    {
+      /* The DMA master, like the CPU, reaches some slaves only through
+       * the +0x10000000 secure alias.  Try the PSRAM alias for PSRAM
+       * destinations.
+       */
+
+      uintptr_t dst = (uintptr_t)buf;
+
+      if ((dst & 0xf0000000) == 0x60000000)
+        {
+          dst += 0x10000000;
+        }
+
+      cam_dma_arm(dst);
+    }
 
   modifyreg32(JPEG_REG_RESET, 0, 1u << 1);    /* clk gate bypass */
   modifyreg32(JPEG_REG_CFG, 0, 1u << 4);      /* jpeg_enc_en */
 
-  /* Drain until EOF is latched AND the FIFO has run dry.  One frame at
-   * 20 fps is 50 ms; the outer budget covers several frame times.
-   */
+  budget = 1000;
+  ret    = -ETIMEDOUT;
 
+  while (budget-- > 0)
     {
-      size_t pos = 0;
-      uint32_t idle = 0;
-      bool eof = false;
-
-      budget = 30000000;
-      ret    = -ETIMEDOUT;
-
-      while (budget-- > 0)
+      if ((getreg32(JPEG_REG_STATUS) & (1u << 1)) != 0)
         {
-          if ((getreg32(JPEG_REG_FIFOSTAT) & JPEG_FIFO_EMPTY) == 0)
-            {
-              uint32_t word = getreg32(JPEG_REG_FIFO);
-
-              idle = 0;
-              if (pos + 4 <= maxlen)
-                {
-                  memcpy(buf + pos, &word, 4);
-                }
-
-              pos += 4;
-              continue;
-            }
-
-          if (eof)
-            {
-              /* EOF seen and FIFO dry: allow a short grace for
-               * stragglers, then call the frame complete.
-               */
-
-              if (++idle > 2000)
-                {
-                  ret = OK;
-                  break;
-                }
-
-              continue;
-            }
-
-          if ((getreg32(JPEG_REG_STATUS) & (1u << 1)) != 0)
-            {
-              eof = true;
-              continue;
-            }
-
-          if ((getreg32(YUV_REG_STATUS) &
-               ((1u << 4) | (1u << 6) | (1u << 8))) != 0)
-            {
-              ret = -EIO;
-              break;
-            }
+          ret = OK;
+          break;
         }
 
-      if (pos > maxlen)
+      if ((getreg32(YUV_REG_STATUS) &
+           ((1u << 4) | (1u << 6) | (1u << 8))) != 0)
         {
-          ret = -E2BIG;
+          ret = -EIO;
+          break;
         }
+
+      up_mdelay(1);
+    }
+
+  /* Drain the FIFO tail through the DMA, then quiesce everything. */
+
+  modifyreg32(DMA_CH8_STAT, 0, 1u << 17);
+  budget = 10000;
+  while ((getreg32(DMA_CH8_STAT) & (1u << 17)) != 0 && --budget > 0)
+    {
     }
 
   /* Stop the engine either way. */
@@ -381,6 +416,7 @@ int bk7258_camera_snap(uint8_t *buf, size_t maxlen)
   modifyreg32(JPEG_REG_CFG, 1u << 4, 0);
 
   count = getreg32(JPEG_REG_BYTECNT);
+  putreg32(0, DMA_CH8_CTRL);
   putreg32(getreg32(JPEG_REG_STATUS), JPEG_REG_STATUS);
   putreg32(getreg32(YUV_REG_STATUS), YUV_REG_STATUS);
 
