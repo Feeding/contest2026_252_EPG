@@ -53,9 +53,7 @@
  * Panel power rides the GPIO52-gated 3.3 V rail that boot switches on.
  */
 
-#define PIN_DC        5
-#define PIN_RST       45
-#define PIN_BACKLIGHT 25
+#define PIN_BACKLIGHT 25   /* Shared by both panels (one transistor) */
 
 #define GC9D01_XRES   160
 #define GC9D01_YRES   160
@@ -72,6 +70,8 @@ struct gc9d01_dev_s
 {
   struct lcd_dev_s dev;
   struct spi_dev_s *spi;
+  uint8_t dc_pin;
+  uint8_t rst_pin;
   uint8_t power;
 
   /* One line of RGB565 pixels, byte-swapped for the wire. */
@@ -187,7 +187,17 @@ static const struct gc9d01_cmd_s g_init_cmds[] =
  * Private Functions
  ****************************************************************************/
 
-static struct gc9d01_dev_s g_gc9d01;
+/* Panel 0: the right eye, on hardware SPI1 (SCK/CS/MOSI = GPIO2/3/4),
+ * D/C on GPIO5, reset on GPIO45.  Panel 1: the left eye, on the software
+ * SPI (GPIO22/23/24), D/C on GPIO7, reset on GPIO6.  Wiring per the board
+ * schematic sheet 5, cross-anchored by the verified key pins.
+ */
+
+static struct gc9d01_dev_s g_gc9d01[2] =
+{
+  { .dc_pin = 5, .rst_pin = 45 },
+  { .dc_pin = 7, .rst_pin = 6  },
+};
 
 /****************************************************************************
  * Name: gc9d01_cmd / gc9d01_data
@@ -201,7 +211,7 @@ static struct gc9d01_dev_s g_gc9d01;
 
 static void gc9d01_cmd(struct gc9d01_dev_s *priv, uint8_t cmd)
 {
-  bk7258_gpio_write(PIN_DC, false);
+  bk7258_gpio_write(priv->dc_pin, false);
   SPI_SNDBLOCK(priv->spi, &cmd, 1);
 }
 
@@ -210,7 +220,7 @@ static void gc9d01_data(struct gc9d01_dev_s *priv, const uint8_t *data,
 {
   if (len > 0)
     {
-      bk7258_gpio_write(PIN_DC, true);
+      bk7258_gpio_write(priv->dc_pin, true);
       SPI_SNDBLOCK(priv->spi, data, len);
     }
 }
@@ -269,7 +279,7 @@ static int gc9d01_putrun(struct lcd_dev_s *dev, fb_coord_t row,
     }
 
   gc9d01_setwindow(priv, col, row, col + npixels - 1, row);
-  bk7258_gpio_write(PIN_DC, true);
+  bk7258_gpio_write(priv->dc_pin, true);
   SPI_SNDBLOCK(priv->spi, priv->runbuf, npixels * 2);
 
   return OK;
@@ -316,8 +326,13 @@ static int gc9d01_setpower(struct lcd_dev_s *dev, int power)
 {
   struct gc9d01_dev_s *priv = (struct gc9d01_dev_s *)dev;
 
+  /* One transistor lights both panels: the backlight goes off only when
+   * neither panel wants power.
+   */
+
   priv->power = power;
-  bk7258_gpio_write(PIN_BACKLIGHT, power > 0);
+  bk7258_gpio_write(PIN_BACKLIGHT,
+                    g_gc9d01[0].power > 0 || g_gc9d01[1].power > 0);
   return OK;
 }
 
@@ -342,57 +357,62 @@ static int gc9d01_setcontrast(struct lcd_dev_s *dev, unsigned int contrast)
 int board_lcd_initialize(void)
 {
   extern struct spi_dev_s *bk7258_spibus_initialize(int port);
-  struct gc9d01_dev_s *priv = &g_gc9d01;
+  extern struct spi_dev_s *bk7258_swspi_initialize(void);
   const struct gc9d01_cmd_s *c;
+  struct gc9d01_dev_s *priv;
   unsigned int i;
+  int panel;
 
-  priv->dev.getvideoinfo = gc9d01_getvideoinfo;
-  priv->dev.getplaneinfo = gc9d01_getplaneinfo;
-  priv->dev.getpower     = gc9d01_getpower;
-  priv->dev.setpower     = gc9d01_setpower;
-  priv->dev.getcontrast  = gc9d01_getcontrast;
-  priv->dev.setcontrast  = gc9d01_setcontrast;
+  g_gc9d01[0].spi = bk7258_spibus_initialize(1);
+  g_gc9d01[1].spi = bk7258_swspi_initialize();
 
-  priv->spi = bk7258_spibus_initialize(1);
-  if (priv->spi == NULL)
-    {
-      return -ENODEV;
-    }
-
-  /* Control lines.  Power (GPIO52 rail) is already on from boot. */
-
-  bk7258_gpio_config(PIN_DC, true, false, false);
-  bk7258_gpio_config(PIN_RST, true, false, false);
   bk7258_gpio_config(PIN_BACKLIGHT, true, false, false);
   bk7258_gpio_write(PIN_BACKLIGHT, false);
 
-  /* Hardware reset: high 10 ms, low 10 ms, high, then the long settle.
-   * Timing from the vendor LCD path; the 120 ms tail matches the panel
-   * family's sleep-out requirement.
-   */
-
-  bk7258_gpio_write(PIN_RST, true);
-  up_mdelay(10);
-  bk7258_gpio_write(PIN_RST, false);
-  up_mdelay(10);
-  bk7258_gpio_write(PIN_RST, true);
-  up_mdelay(120);
-
-  /* Manufacturer initialisation. */
-
-  for (i = 0; i < sizeof(g_init_cmds) / sizeof(g_init_cmds[0]); i++)
+  for (panel = 0; panel < 2; panel++)
     {
-      c = &g_init_cmds[i];
-      gc9d01_cmd(priv, c->cmd);
-      gc9d01_data(priv, c->data, c->len);
+      priv = &g_gc9d01[panel];
 
-      if (c->delay_ms != 0)
+      priv->dev.getvideoinfo = gc9d01_getvideoinfo;
+      priv->dev.getplaneinfo = gc9d01_getplaneinfo;
+      priv->dev.getpower     = gc9d01_getpower;
+      priv->dev.setpower     = gc9d01_setpower;
+      priv->dev.getcontrast  = gc9d01_getcontrast;
+      priv->dev.setcontrast  = gc9d01_setcontrast;
+
+      if (priv->spi == NULL)
         {
-          up_mdelay(c->delay_ms);
+          return -ENODEV;
+        }
+
+      bk7258_gpio_config(priv->dc_pin, true, false, false);
+      bk7258_gpio_config(priv->rst_pin, true, false, false);
+
+      /* Hardware reset: high 10 ms, low 10 ms, high, long settle. */
+
+      bk7258_gpio_write(priv->rst_pin, true);
+      up_mdelay(10);
+      bk7258_gpio_write(priv->rst_pin, false);
+      up_mdelay(10);
+      bk7258_gpio_write(priv->rst_pin, true);
+      up_mdelay(120);
+
+      /* Manufacturer initialisation. */
+
+      for (i = 0; i < sizeof(g_init_cmds) / sizeof(g_init_cmds[0]); i++)
+        {
+          c = &g_init_cmds[i];
+          gc9d01_cmd(priv, c->cmd);
+          gc9d01_data(priv, c->data, c->len);
+
+          if (c->delay_ms != 0)
+            {
+              up_mdelay(c->delay_ms);
+            }
         }
     }
 
-  lcdinfo("GC9D01 initialised\n");
+  lcdinfo("GC9D01 x2 initialised\n");
   return OK;
 }
 
@@ -402,7 +422,12 @@ int board_lcd_initialize(void)
 
 struct lcd_dev_s *board_lcd_getdev(int lcddev)
 {
-  return (lcddev == 0) ? &g_gc9d01.dev : NULL;
+  if (lcddev >= 0 && lcddev < 2)
+    {
+      return &g_gc9d01[lcddev].dev;
+    }
+
+  return NULL;
 }
 
 /****************************************************************************
@@ -411,7 +436,8 @@ struct lcd_dev_s *board_lcd_getdev(int lcddev)
 
 void board_lcd_uninitialize(void)
 {
-  gc9d01_setpower(&g_gc9d01.dev, 0);
+  gc9d01_setpower(&g_gc9d01[0].dev, 0);
+  gc9d01_setpower(&g_gc9d01[1].dev, 0);
 }
 
 #endif /* CONFIG_LCD && CONFIG_BK7258_SPI1 */

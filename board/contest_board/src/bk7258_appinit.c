@@ -143,7 +143,13 @@ int board_app_initialize(uintptr_t arg)
   ret = fb_register(0, 0);
   if (ret < 0)
     {
-      syslog(LOG_ERR, "ERROR: fb_register: %d\n", ret);
+      syslog(LOG_ERR, "ERROR: fb_register(0): %d\n", ret);
+    }
+
+  ret = fb_register(1, 0);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: fb_register(1): %d\n", ret);
     }
 #endif
 

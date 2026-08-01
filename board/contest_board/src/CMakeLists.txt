@@ -44,7 +44,7 @@ if(CONFIG_I2C_BITBANG)
 endif()
 
 if(CONFIG_LCD)
-  list(APPEND SRCS bk7258_gc9d01.c)
+  list(APPEND SRCS bk7258_gc9d01.c bk7258_swspi.c)
 endif()
 
 target_sources(board PRIVATE ${SRCS})
