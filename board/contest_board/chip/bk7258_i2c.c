@@ -416,8 +416,15 @@ struct i2c_master_s *bk7258_i2cbus_initialize(int port)
       modifyreg32(BK7258_SYS_CPU_DEVICE_CKEN, 0, 1 << 8);
       i2c_putreg(priv, I2C_GLOBAL_OFFSET,
                  I2C_GLOBAL_SOFT_RESET | I2C_GLOBAL_CLK_BYPASS);
-      bk7258_gpio_setaf(0, 1, true);
-      bk7258_gpio_setaf(1, 1, true);
+
+      /* I2C1 reaches two pad sets: GPIO0/1 (alternate 1) and GPIO42/43
+       * (alternate 0).  The camera's SCCB lives on 42/43 -- the vendor
+       * firmware bit-bangs exactly these pins and the SDK's DVP driver
+       * defaults to hardware I2C1 here.  Nothing ever answered on 0/1.
+       */
+
+      bk7258_gpio_setaf(42, 0, true);
+      bk7258_gpio_setaf(43, 0, true);
     }
   else
     {
