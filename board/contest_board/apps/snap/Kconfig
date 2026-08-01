@@ -1,0 +1,7 @@
+config CONTEST_SNAP
+	bool "Contest board camera snapshot command"
+	default n
+	depends on I2C_BITBANG
+	---help---
+		"snap [path]" NSH command: capture one JPEG frame from the
+		GC2145 DVP camera and write it to a file.

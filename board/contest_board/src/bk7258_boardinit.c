@@ -92,7 +92,11 @@ void board_late_initialize(void)
    * stays out: the black-box recorder lives at 0x28048000.
    */
 
-  kumm_addregion((void *)0x28050000, 0x280a0000 - 0x28050000);
+  /* Top 32 KB (0x28098000+) stays out of the heap: the camera's YUV
+   * line ping-pong buffer lives there and must be SRAM.
+   */
+
+  kumm_addregion((void *)0x28050000, 0x28098000 - 0x28050000);
 #endif
 
 #if CONFIG_MM_REGIONS > 2
