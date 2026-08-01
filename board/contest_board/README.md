@@ -226,6 +226,10 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 
 ## 九、当前状态
 
+> 控制台之后的外设 bring-up 全史（RX 卡死结案、看门狗复位、灯/键/马达、
+> I2C、双屏 QSPI 战役、eyes 动画）见 **[PORTING_NOTES.md](PORTING_NOTES.md)**。
+> 本章下方各小节保留为芯片层启动阶段的历史取证记录。
+
 - [x] 芯片层：启动、中断、时钟、GPIO、UART、SysTick、堆
 - [x] 板级层：defconfig、链接脚本、板级初始化
 - [x] 构建集成：openvela CMake 构建通过，干净重建可复现
@@ -235,7 +239,12 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 - [x] 真机烧录：写入 `0x11000` 成功，回读逐字节一致
 - [x] **bootloader 交接**：裸桩在真机执行并输出，交接完全正常
 - [x] **`__start()` 全程走通**：9 个检查点全部到达，`nx_start()` 已进入
-- [ ] 真机控制台：**未通过**（`nx_start()` 之后无输出）
+- [x] 真机控制台：**稳定**（rd_ready 判据 + 监控线程，详见 PORTING_NOTES 一章）
+- [x] 看门狗复位与自动重烧（PORTING_NOTES 二章）
+- [x] LED / 按键 / 马达（标准 NuttX 驱动，实机验证）
+- [x] I2C 主机 ×2 + 位敲备胎（引擎验证,待正向应答从机）
+- [x] 双 GC9D01 屏全部走硬件 QSPI（61 字缓冲 RAM 结案,PORTING_NOTES 七章）
+- [x] `eyes` 机器人眼动画应用（17fps 实测）
 
 ### 内存布局约束（实测所得）
 
