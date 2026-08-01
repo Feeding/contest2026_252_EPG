@@ -73,15 +73,22 @@ static int bk7258_timerisr(int irq, uint32_t *regs, void *arg)
 {
   /* Reading the control register clears the count flag. */
 
-  /* Heartbeat: re-arm the watchdog every tick.  If ticks stop -- a spin
-   * with interrupts masked, a wedged handler, a runaway loop at interrupt
-   * level -- the dog fires and the chip resets itself into the bootloader's
-   * download window.  That is deliberate: on this board nothing but the
-   * RST button can reset the chip from outside, so a hang that keeps the
-   * watchdog fed would strand the board until a human walks over.
+  /* Heartbeat: re-arm the watchdog on every 10th tick.  If ticks stop --
+   * a spin with interrupts masked, a wedged handler, a runaway loop at
+   * interrupt level -- the dog fires and the chip resets itself into the
+   * bootloader's download window.  Decimated because the arm sequence
+   * crosses into the slow AON bus: at the 1 kHz tick rate an every-tick
+   * feed taxed the CPU hard enough to cost the eye animation ~1/3 of its
+   * frame budget.
    */
 
-  bk7258_wdt_arm(BK7258_WDT_PERIOD_RUN);
+  static unsigned int decimate = 0;
+
+  if (++decimate >= 10)
+    {
+      decimate = 0;
+      bk7258_wdt_arm(BK7258_WDT_PERIOD_RUN);
+    }
 
   nxsched_process_timer();
   return OK;

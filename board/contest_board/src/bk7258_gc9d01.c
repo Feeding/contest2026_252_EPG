@@ -301,26 +301,50 @@ static int gc9d01_putarea(struct lcd_dev_s *dev, fb_coord_t row_start,
                           fb_coord_t col_end, const uint8_t *buffer,
                           fb_coord_t stride)
 {
+  /* Rows are batched before hitting the bus: every SNDBLOCK is a full
+   * indirect-engine round trip (fill, start, poll), so its fixed cost --
+   * not the wire clock -- dominates small transfers.  Eight rows per
+   * batch cuts the round trips 8x for the price of a 2.5 KB bounce.
+   */
+
+  static uint8_t batchbuf[8 * GC9D01_XRES * 2];
+
   struct gc9d01_dev_s *priv = (struct gc9d01_dev_s *)dev;
-  fb_coord_t row;
+  fb_coord_t row = row_start;
   size_t width = col_end - col_start + 1;
   const uint16_t *src;
+  uint8_t *dst;
   size_t i;
 
   gc9d01_setwindow(priv, col_start, row_start, col_end, row_end);
   bk7258_gpio_write(priv->dc_pin, true);
 
-  for (row = row_start; row <= row_end; row++)
+  while (row <= row_end)
     {
-      src = (const uint16_t *)(buffer + (row - row_start) * stride);
+      size_t nrows = row_end - row + 1;
 
-      for (i = 0; i < width; i++)
+      if (nrows > 8)
         {
-          priv->runbuf[2 * i]     = src[i] >> 8;
-          priv->runbuf[2 * i + 1] = src[i] & 0xff;
+          nrows = 8;
         }
 
-      SPI_SNDBLOCK(priv->spi, priv->runbuf, width * 2);
+      dst = batchbuf;
+
+      for (i = 0; i < nrows; i++)
+        {
+          size_t x;
+
+          src = (const uint16_t *)(buffer + (row - row_start + i) * stride);
+
+          for (x = 0; x < width; x++)
+            {
+              *dst++ = src[x] >> 8;
+              *dst++ = src[x] & 0xff;
+            }
+        }
+
+      SPI_SNDBLOCK(priv->spi, batchbuf, nrows * width * 2);
+      row += nrows;
     }
 
   return OK;

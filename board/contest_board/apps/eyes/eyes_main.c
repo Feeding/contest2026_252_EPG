@@ -213,6 +213,8 @@ int main(int argc, char *argv[])
   uint32_t next_gaze;
   uint32_t next_blink;
   uint32_t frames = 0;
+  uint32_t t_render = 0;
+  uint32_t t_flush = 0;
   int i;
 
   if (eye_open(&eye[0], "/dev/fb0") < 0)
@@ -319,10 +321,24 @@ int main(int argc, char *argv[])
       if (x1 > EYE_XRES - 1) x1 = EYE_XRES - 1;
       if (y1 > EYE_YRES - 1) y1 = EYE_YRES - 1;
 
-      for (i = 0; i < 2; i++)
         {
-          eye_render(&eye[i], cx, cy, lid, x0, y0, x1, y1);
-          eye_flush(&eye[i], x0, y0, x1, y1);
+          uint32_t ta = now_ms();
+          uint32_t tb;
+
+          for (i = 0; i < 2; i++)
+            {
+              eye_render(&eye[i], cx, cy, lid, x0, y0, x1, y1);
+            }
+
+          tb = now_ms();
+
+          for (i = 0; i < 2; i++)
+            {
+              eye_flush(&eye[i], x0, y0, x1, y1);
+            }
+
+          t_render += tb - ta;
+          t_flush  += now_ms() - tb;
         }
 
       px0 = cx - R_RING - 1;
@@ -347,9 +363,11 @@ int main(int argc, char *argv[])
   {
     uint32_t total = now_ms() - start;
 
-    printf("eyes: %lu frames in %lu ms (%lu fps)\n",
+    printf("eyes: %lu frames in %lu ms (%lu fps) render=%lums flush=%lums\n",
            (unsigned long)frames, (unsigned long)total,
-           (unsigned long)(total ? frames * 1000 / total : 0));
+           (unsigned long)(total ? frames * 1000 / total : 0),
+           (unsigned long)(frames ? t_render / frames : 0),
+           (unsigned long)(frames ? t_flush / frames : 0));
   }
 
   for (i = 0; i < 2; i++)
