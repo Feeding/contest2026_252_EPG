@@ -30,17 +30,22 @@ XFER_BAUD = 1500000
 DEFAULT_PORT = "/dev/cu.usbserial-310"
 
 
-def wait_for_chip(port, baud=115200, announce_every=2000):
+def wait_for_chip(port, baud=115200, announce_every=2000, reboot=False):
     """Block until the chip answers a link check.
 
     The l_bootloader download window is only tens of milliseconds wide, so this
     must not leave gaps: the port is opened once and the link check goes out
     back to back until something answers.  An earlier version cycled baud rates
     and reopened the port each round, and lost RST presses in the seams.
+
+    With ``reboot=True`` the console's ``reboot`` command is sent on the SAME
+    already-open port immediately before the hammering starts, so the window a
+    watchdog reset opens lands in an already-running probe stream.  Sending the
+    reboot from a separate process never worked -- the process seam alone eats
+    more time than the whole window -- and weeks of "reboot flashing" successes
+    were in fact the operator pressing RST.
     """
     probes = 0
-    print(f"waiting for the chip at {baud} baud -- press RST once, any time",
-          flush=True)
 
     while not os.path.exists(port):
         time.sleep(0.5)
@@ -52,6 +57,15 @@ def wait_for_chip(port, baud=115200, announce_every=2000):
         ser.dtr = False
         ser.rts = False
         ser.reset_input_buffer()
+
+        if reboot:
+            ser.write(b"\r\nreboot\r\n")
+            ser.flush()
+            print("sent 'reboot'; hammering for the download window "
+                  "(RST still works as fallback)", flush=True)
+        else:
+            print(f"waiting for the chip at {baud} baud -- "
+                  "press RST once, any time", flush=True)
 
         while True:
             ser.write(LINK)
@@ -84,21 +98,26 @@ def run_bk_loader(args):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--read":
-        out_file, start, length = sys.argv[2], sys.argv[3], sys.argv[4]
-        port = sys.argv[5] if len(sys.argv) > 5 else DEFAULT_PORT
-        wait_for_chip(port)
+    argv = list(sys.argv[1:])
+    reboot = "--reboot" in argv
+    if reboot:
+        argv.remove("--reboot")
+
+    if argv and argv[0] == "--read":
+        out_file, start, length = argv[1], argv[2], argv[3]
+        port = argv[4] if len(argv) > 4 else DEFAULT_PORT
+        wait_for_chip(port, reboot=reboot)
         ok = run_bk_loader([
             "read", "-p", port, "-b", str(XFER_BAUD), "--reset_type", "3",
             "-g", "300", "-f", f"{out_file}@{start}-{length}",
         ])
     else:
-        image = sys.argv[1]
-        start = sys.argv[2]
-        port = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_PORT
+        image = argv[0]
+        start = argv[1]
+        port = argv[2] if len(argv) > 2 else DEFAULT_PORT
         print(f"image : {image}  {os.path.getsize(image)} bytes")
         print(f"target: {start}")
-        wait_for_chip(port)
+        wait_for_chip(port, reboot=reboot)
         ok = run_bk_loader([
             "download", "-p", port, "-b", str(XFER_BAUD), "--reset_type", "3",
             "-g", "300", "-e", "1", "-r", "-i", os.path.abspath(image),
