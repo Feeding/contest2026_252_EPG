@@ -90,6 +90,14 @@ def main() -> int:
     with open(args.infile, "rb") as handle:
         data = handle.read()
 
+    # Tail guard: the ICache prefetches sequentially past the last real
+    # instruction, and a fetch that lands in flash the packer never wrote
+    # reads a CRC-invalid block and hangs the bus (boot lived or died on
+    # a 536-byte size difference before this).  4 KB of valid padding
+    # puts the cliff out of prefetch reach forever.
+
+    data = data + b"\xff" * 4096
+
     if args.verify:
         bad = verify(data)
         blocks = len(data) // BLOCK_TOTAL
