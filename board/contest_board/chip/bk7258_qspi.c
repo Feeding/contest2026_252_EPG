@@ -326,14 +326,14 @@ struct spi_dev_s *bk7258_qspibus_initialize(int port)
       priv = &g_qspi_devs[0];
       modifyreg32(BK7258_SYS_CPU_DEVICE_CKEN, 0, 1 << 20);
       modifyreg32(BK7258_SYS_BASE + (0x09 << 2),
-                  (0xf << 6) | (1 << 10), (0xf << 6));
+                  (0xf << 6) | (1 << 10), (7 << 6));
     }
   else if (port == 1)
     {
       priv = &g_qspi_devs[1];
       modifyreg32(BK7258_SYS_CPU_DEVICE_CKEN, 0, 1 << 21);
       modifyreg32(BK7258_SYS_BASE + (0x0a << 2),
-                  (0xf << 6) | (1 << 10), (0xf << 6));
+                  (0xf << 6) | (1 << 10), (7 << 6));
     }
   else
     {
