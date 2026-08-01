@@ -29,6 +29,49 @@
 #include "arm_internal.h"
 #include "bk7258_clockconfig.h"
 
+#ifdef CONFIG_BK7258_TXPIN_TRACE
+/* Defined in bk7258_start.c; see CONFIG_BK7258_TXPIN_TRACE. */
+void bk7258_txpin_mark(void);
+#  define txmark() bk7258_txpin_mark()
+#else
+#  define txmark()
+#endif
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_clock_settle
+ *
+ * Description:
+ *   Wait after re-sourcing or ungating a module clock before anything touches
+ *   the module.
+ *
+ *   This is not decoration.  Without it the boot stopped here: the marker
+ *   placed immediately after bk7258_clockconfig() never appeared, and every
+ *   later stage was dead.  Adding two instrumentation calls inside this
+ *   function -- whose only effect was to burn about half a second between the
+ *   register writes -- made the same image, same layout and same config run
+ *   all the way to nx_start().  So what the code needed was time, not a
+ *   different register value; the values were checked bit by bit against the
+ *   vendor headers and are correct.
+ *
+ *   How much time is actually required is not known -- the working figure came
+ *   from a probe, not from a datasheet -- so this errs high.  It costs a few
+ *   milliseconds once per UART at boot.
+ *
+ ****************************************************************************/
+
+static void bk7258_clock_settle(void)
+{
+  volatile uint32_t spin;
+
+  for (spin = 0; spin < 200000; spin++)
+    {
+    }
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -69,15 +112,23 @@ void bk7258_uart_clockenable(int uart)
    * Clearing both the divider and the select bit selects XTAL/1.
    */
 
+  txmark();   /* trace 3a: entered, about to touch the divider */
+
   regval  = getreg32(BK7258_SYS_CPU_CLKDIV_MODE1);
   regval &= ~divsel;
   putreg32(regval, BK7258_SYS_CPU_CLKDIV_MODE1);
+
+  bk7258_clock_settle();
+
+  txmark();   /* trace 3b: divider written, clock still gated */
 
   /* Ungate the module clock. */
 
   regval  = getreg32(BK7258_SYS_CPU_DEVICE_CKEN);
   regval |= cken;
   putreg32(regval, BK7258_SYS_CPU_DEVICE_CKEN);
+
+  bk7258_clock_settle();
 }
 
 /****************************************************************************

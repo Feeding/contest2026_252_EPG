@@ -47,7 +47,15 @@
 #define GPIO_CFG_INPUT              (1 << 0)  /* Bit 0:  Input value (RO) */
 #define GPIO_CFG_OUTPUT             (1 << 1)  /* Bit 1:  Output value */
 #define GPIO_CFG_INPUT_EN           (1 << 2)  /* Bit 2:  Input enable */
-#define GPIO_CFG_OUTPUT_EN          (1 << 3)  /* Bit 3:  Output enable */
+#define GPIO_CFG_OUTPUT_DIS         (1 << 3)  /* Bit 3:  Output disable.  This
+                                               * bit is LOW active: the pad
+                                               * drives only while it reads 0.
+                                               * Named for what setting it
+                                               * does, because an "enable" that
+                                               * has to be cleared to enable is
+                                               * how this port came to leave
+                                               * every output in high-Z.
+                                               */
 #define GPIO_CFG_PULL_UP            (1 << 4)  /* Bit 4:  1=pull up, 0=down */
 #define GPIO_CFG_PULL_EN            (1 << 5)  /* Bit 5:  Pull enable */
 #define GPIO_CFG_FUNC_EN            (1 << 6)  /* Bit 6:  Peripheral function */
@@ -110,7 +118,7 @@
  *
  ****************************************************************************/
 
-void bk7258_gpio_setaf(int pin, uint8_t af);
+void bk7258_gpio_setaf(int pin, uint8_t af, bool input);
 
 /****************************************************************************
  * Name: bk7258_gpio_config

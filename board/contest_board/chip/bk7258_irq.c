@@ -36,6 +36,7 @@
 #include "ram_vectors.h"
 
 #include "chip.h"
+#include "bk7258_memorymap.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -175,6 +176,17 @@ void up_irqinitialize(void)
               NVIC_SYSHCON_MEMFAULTENA);
 #endif
 
+  /* Attach the SVCall and hard fault handlers.  Setting the SVCall priority
+   * below is not enough on its own: without these two attaches the vector
+   * slots still hold irq_unexpected_isr, and the very first context switch
+   * raises SVCall.  The symptom of leaving them out is a shell that prints
+   * its banner and then ignores every keystroke -- boot-time code runs, but
+   * any wakeup that needs the scheduler dies in "ERROR irq: 11".
+   */
+
+  irq_attach(NVIC_IRQ_SVCALL, arm_svcall, NULL);
+  irq_attach(NVIC_IRQ_HARDFAULT, arm_hardfault, NULL);
+
   /* SVCall has to stay above the BASEPRI mask level. */
 
   bk7258_prioritize_syscall(NVIC_SYSH_SVCALL_PRIORITY);
@@ -203,6 +215,12 @@ void up_disable_irq(int irq)
 
       n = irq - NVIC_IRQ_FIRST;
       putreg32((uint32_t)1 << (n & 0x1f), NVIC_IRQ_CLEAR(n));
+
+      /* Take the line out of the SoC routing matrix as well; see
+       * up_enable_irq() for why the matrix exists.
+       */
+
+      modifyreg32(BK7258_SYS_CPU0_INT_EN(n), (uint32_t)1 << (n & 0x1f), 0);
     }
   else if (bk7258_exception_bit(irq, &regaddr, &bit) == OK)
     {
@@ -231,6 +249,19 @@ void up_enable_irq(int irq)
 
       n = irq - NVIC_IRQ_FIRST;
       putreg32((uint32_t)1 << (n & 0x1f), NVIC_IRQ_ENABLE(n));
+
+      /* The NVIC is not the only gate on this SoC.  Interrupt lines pass
+       * through a per-CPU routing matrix in the system block first --
+       * cpu0_int_0_31_en / cpu0_int_32_63_en -- and a line whose matrix bit
+       * is clear never reaches the NVIC at all, no matter what the NVIC
+       * enable says.  The Beken bootloader sets bit 4 (UART0) there as the
+       * last step of bringing its console up and clears it again on the way
+       * out, which is how this port booted to a shell whose transmit worked
+       * while every received byte vanished: polled TX needs no interrupt,
+       * RX does.  The bit index matches the NVIC line number.
+       */
+
+      modifyreg32(BK7258_SYS_CPU0_INT_EN(n), 0, (uint32_t)1 << (n & 0x1f));
     }
   else if (bk7258_exception_bit(irq, &regaddr, &bit) == OK)
     {

@@ -51,18 +51,18 @@ static void bk7258_uart_pinmux(int uart)
   switch (uart)
     {
       case 0:
-        bk7258_gpio_setaf(BK7258_GPIO_UART0_RX, BK7258_GPIO_UART0_AF);
-        bk7258_gpio_setaf(BK7258_GPIO_UART0_TX, BK7258_GPIO_UART0_AF);
+        bk7258_gpio_setaf(BK7258_GPIO_UART0_RX, BK7258_GPIO_UART0_AF, true);
+        bk7258_gpio_setaf(BK7258_GPIO_UART0_TX, BK7258_GPIO_UART0_AF, false);
         break;
 
       case 1:
-        bk7258_gpio_setaf(BK7258_GPIO_UART1_RX, BK7258_GPIO_UART1_AF);
-        bk7258_gpio_setaf(BK7258_GPIO_UART1_TX, BK7258_GPIO_UART1_AF);
+        bk7258_gpio_setaf(BK7258_GPIO_UART1_RX, BK7258_GPIO_UART1_AF, true);
+        bk7258_gpio_setaf(BK7258_GPIO_UART1_TX, BK7258_GPIO_UART1_AF, false);
         break;
 
       case 2:
-        bk7258_gpio_setaf(BK7258_GPIO_UART2_RX, BK7258_GPIO_UART2_AF);
-        bk7258_gpio_setaf(BK7258_GPIO_UART2_TX, BK7258_GPIO_UART2_AF);
+        bk7258_gpio_setaf(BK7258_GPIO_UART2_RX, BK7258_GPIO_UART2_AF, true);
+        bk7258_gpio_setaf(BK7258_GPIO_UART2_TX, BK7258_GPIO_UART2_AF, false);
         break;
 
       default:
@@ -89,17 +89,43 @@ void bk7258_uart_configure(uintptr_t base, int uart, uint32_t baud,
   bk7258_uart_clockenable(uart);
   bk7258_uart_pinmux(uart);
 
-  /* Reset the block so we start from a known state regardless of what the
-   * ROM downloader left behind, then release the reset.
+  /* Write 1 to global_ctrl bit 0 and leave it there.
+   *
+   * This bit is not a self-clearing reset pulse, and writing 0 afterwards is
+   * what an earlier version of this port did -- it holds the transmit engine
+   * in reset permanently.  The failure is deceptive: the FIFO logic still
+   * runs, so write-ready stays asserted and every register reads back
+   * correctly, but nothing the FIFO swallows ever reaches the wire.
+   *
+   * Three independent sources agree the bit is a persistent state, 1 =
+   * released: the Beken bootloader writes 1 here and never writes 0, with the
+   * UART demonstrably working afterwards (it carries the download protocol);
+   * the vendor SDK's uart_ll_soft_reset() only ever writes 1; and the SDK's
+   * suspend/resume code saves and restores this register's value, which would
+   * be meaningless for a momentary trigger.
    */
 
   putreg32(UART_GLOBAL_SOFT_RESET, base + BK7258_UART_GLOBAL_CTRL_OFFSET);
-  putreg32(0, base + BK7258_UART_GLOBAL_CTRL_OFFSET);
 
   /* Mask every interrupt source and clear anything already latched. */
 
   putreg32(0, base + BK7258_UART_INT_ENABLE_OFFSET);
   putreg32(0xffffffff, base + BK7258_UART_INT_STATUS_OFFSET);
+
+  /* Turn hardware flow control and the wake-up logic off.
+   *
+   * Neither is wanted, and leaving flow control alone is not safe on this
+   * board: with it enabled the transmitter accepts bytes into the FIFO and
+   * then waits for CTS before putting any of them on the wire, and the CH340
+   * bridge here has its RTS#/CTS# pins unconnected, so CTS never arrives.
+   * The symptom is a console that reports itself ready and stays silent.
+   * The vendor driver clears both registers on every init for the same
+   * reason; this port did not, and inherited whatever the ROM downloader
+   * left behind.
+   */
+
+  putreg32(0, base + BK7258_UART_FLOW_CTRL_OFFSET);
+  putreg32(0, base + BK7258_UART_WAKE_CONFIG_OFFSET);
 
   /* Line format and baud rate. */
 
@@ -174,9 +200,28 @@ void bk7258_lowsetup(void)
 void arm_lowputc(char ch)
 {
 #ifdef HAVE_CONSOLE
+  /* Give up rather than wait forever.
+   *
+   * An unbounded wait here makes a console that never asserts write-ready
+   * freeze the entire boot, and it freezes it inside the one routine that
+   * would otherwise have said something about it: the board goes silent with
+   * no way to tell a dead UART from a dead kernel.  Dropping the character
+   * keeps that failure visible somewhere else instead of hiding it here.
+   *
+   * The bound is generous -- a character at 115200 needs under 90us, and this
+   * is several milliseconds of spinning even at the slowest plausible core
+   * clock.
+   */
+
+  uint32_t timeout = 1000000;
+
   while ((getreg32(BK7258_CONSOLE_BASE + BK7258_UART_FIFO_STATUS_OFFSET) &
           UART_FIFO_STATUS_WR_READY) == 0)
     {
+      if (--timeout == 0)
+        {
+          return;
+        }
     }
 
   putreg32((uint32_t)(unsigned char)ch,

@@ -1,5 +1,7 @@
 /****************************************************************************
- * board/contest_board/chip/bk7258_allocateheap.c
+ * board/contest_board/chip/bk7258_wdt.c
+ *
+ * Watchdog control for the BK7258.
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -24,59 +26,53 @@
 
 #include <nuttx/config.h>
 
-#include <stddef.h>
-
-#include <nuttx/arch.h>
-#include <nuttx/kmalloc.h>
+#include <stdint.h>
 
 #include "arm_internal.h"
+
 #include "bk7258_memorymap.h"
-
-/* Supplied by the link script: the end of the RAM region. */
-
-extern uint8_t _eram[];
+#include "bk7258_wdt.h"
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
 /****************************************************************************
- * Name: up_allocate_heap
- *
- * Description:
- *   The heap occupies everything between the top of the IDLE thread stack
- *   and the end of the 640KB shared SRAM.
- *
+ * Name: bk7258_wdt_arm
  ****************************************************************************/
 
-void up_allocate_heap(void **heap_start, size_t *heap_size)
+void bk7258_wdt_arm(uint32_t period)
 {
-  /* The end comes from the link script, not from BK7258_SRAM_END: the chip
-   * has 640K of SRAM but this board only links, and only boots from, part of
-   * it.  See the memory region comment in scripts/ld.script.
+  period &= 0xffff;
+
+  /* Only the always-on watchdog is written.  The first build of this file
+   * also wrote the peripheral-domain counter at 0x44800010 -- copying the
+   * bootloader routine -- and placing that write at the top of __start()
+   * bricked the board into total silence: no marker, no trace, no reset,
+   * which is the signature of an APB access to an unclocked block stalling
+   * the bus.  The bootloader can write it because its own init has run; at
+   * application entry nothing guarantees that block a clock.  The AON block
+   * lives in the always-on domain, is the one the vendor's force-feed
+   * routine treats as primary, and is sufficient to reset the SoC.
    */
 
-  *heap_start = (void *)g_idle_topstack;
-  *heap_size  = (uintptr_t)_eram - g_idle_topstack;
+  putreg32(0x5a0000 | period, BK7258_AON_WDT_BASE);
+  putreg32(0xa50000 | period, BK7258_AON_WDT_BASE);
 }
 
 /****************************************************************************
- * Name: arm_addregion
- *
- * Description:
- *   Register any additional, non-contiguous memory with the allocator.
- *
+ * Name: bk7258_wdt_reboot
  ****************************************************************************/
 
-#if CONFIG_MM_REGIONS > 1
-void arm_addregion(void)
+void bk7258_wdt_reboot(void)
 {
-#ifdef CONFIG_BK7258_PSRAM_HEAP
-  /* The SiP PSRAM is only usable once the PSRAM controller has been brought
-   * up, which this minimal port does not yet do.
+  /* Mask interrupts so nothing can re-arm a longer period underneath us,
+   * then let the shortest period expire.
    */
 
-  kumm_addregion((void *)BK7258_PSRAM_BASE, CONFIG_BK7258_PSRAM_HEAP_SIZE);
-#endif
+  __asm__ __volatile__ ("cpsid i" : : : "memory");
+
+  bk7258_wdt_arm(BK7258_WDT_PERIOD_BOOT);
+
+  for (; ; );
 }
-#endif

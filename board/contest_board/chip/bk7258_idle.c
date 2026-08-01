@@ -1,5 +1,5 @@
 /****************************************************************************
- * board/contest_board/chip/bk7258_allocateheap.c
+ * board/contest_board/chip/bk7258_idle.c
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -23,60 +23,34 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
-
-#include <stddef.h>
-
 #include <nuttx/arch.h>
-#include <nuttx/kmalloc.h>
-
-#include "arm_internal.h"
-#include "bk7258_memorymap.h"
-
-/* Supplied by the link script: the end of the RAM region. */
-
-extern uint8_t _eram[];
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
 /****************************************************************************
- * Name: up_allocate_heap
+ * Name: up_idle
  *
  * Description:
- *   The heap occupies everything between the top of the IDLE thread stack
- *   and the end of the 640KB shared SRAM.
+ *   Idle without WFI.
+ *
+ *   The generic ARM idle loop executes WFI, and on this SoC that is not a
+ *   plain core halt: the interactive console died reproducibly at the same
+ *   point once the system first went idle -- two characters echoed, then
+ *   nothing was ever received again -- and the UART's wake controls
+ *   (wake_config, which this port zeroes the way the bootloader does) decide
+ *   what can bring the fabric back.  The bootloader itself never sleeps; it
+ *   busy-polls, so its configuration is only known to be safe for a machine
+ *   that never executes WFI.
+ *
+ *   Until the sleep and wake plumbing is brought up deliberately (via the
+ *   vendor pm driver's register set), idling must not power anything down:
+ *   spin instead.  This costs power, not correctness, and this board is
+ *   USB-fed on a bench.
  *
  ****************************************************************************/
 
-void up_allocate_heap(void **heap_start, size_t *heap_size)
+void up_idle(void)
 {
-  /* The end comes from the link script, not from BK7258_SRAM_END: the chip
-   * has 640K of SRAM but this board only links, and only boots from, part of
-   * it.  See the memory region comment in scripts/ld.script.
-   */
-
-  *heap_start = (void *)g_idle_topstack;
-  *heap_size  = (uintptr_t)_eram - g_idle_topstack;
 }
-
-/****************************************************************************
- * Name: arm_addregion
- *
- * Description:
- *   Register any additional, non-contiguous memory with the allocator.
- *
- ****************************************************************************/
-
-#if CONFIG_MM_REGIONS > 1
-void arm_addregion(void)
-{
-#ifdef CONFIG_BK7258_PSRAM_HEAP
-  /* The SiP PSRAM is only usable once the PSRAM controller has been brought
-   * up, which this minimal port does not yet do.
-   */
-
-  kumm_addregion((void *)BK7258_PSRAM_BASE, CONFIG_BK7258_PSRAM_HEAP_SIZE);
-#endif
-}
-#endif

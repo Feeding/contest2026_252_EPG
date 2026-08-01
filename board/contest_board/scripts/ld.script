@@ -41,7 +41,32 @@
 MEMORY
 {
   flash (rx)  : ORIGIN = 0x02010000, LENGTH = 1728K
-  sram  (rwx) : ORIGIN = 0x28000000, LENGTH = 640K
+  /* SRAM is six banks: SRAM0 0x28000000 (64K), SRAM1 0x28010000 (64K), then
+   * 0x28020000, 0x28040000, 0x28060000 and 0x28080000 at 128K each.  All six
+   * take a word write and read it back at handover -- a standalone probe
+   * checked eleven addresses across the range and every one survived.  Two
+   * stronger requirements narrow what is actually usable, and they pull in
+   * opposite directions:
+   *
+   * The initial stack must sit high.  A probe pointed MSP at eight addresses
+   * and made each carry a real call frame: 0x28032468, 0x28042468, 0x28062468,
+   * 0x28082468 and 0x2803c800 all survived, while 0x28022468 wedged the CPU
+   * outright.  Every linked image whose initial SP fell below that line died
+   * before executing one reportable instruction.  The boundary lands where the
+   * Beken bootloader keeps its own stack, since its vector table starts SP at
+   * 0x28030000 -- suggestive, but not established.
+   *
+   * .data and .bss must sit low.  With them at 0x28020000 the boot reaches
+   * every checkpoint in __start(); moving them to 0x28040000, with the stack
+   * left at a known-good address, kills it inside bk7258_clockconfig().  Why a
+   * bank that holds a stack cannot hold .bss is not explained yet.
+   *
+   * So both live in SRAM2: .data/.bss from the bottom, and the IDLE thread
+   * stack pushed to 0x28034000 by CONFIG_IDLETHREAD_STACKSIZE, above the
+   * boundary.  The heap gets what is left, 0x28034000 to 0x28040000.
+   */
+
+  sram  (rwx) : ORIGIN = 0x28020000, LENGTH = 128K
 }
 
 OUTPUT_ARCH(arm)
@@ -148,13 +173,25 @@ SECTIONS
         _edata = ABSOLUTE(.);
     } > sram AT > flash
 
+    /* Both bounds are 8-byte aligned, not 4.
+     *
+     * _ebss is where the IDLE thread stack starts, so it decides the initial
+     * SP in the vector table, and AAPCS wants that 8-byte aligned at every
+     * call boundary.  At ALIGN(4) this landed on 0x28021c64 and the initial SP
+     * on 0x28022464, four bytes off: the image then died before reaching the
+     * first instruction of __start that could report anything.  Forcing the
+     * same image to start with SP = 0x2803c800, which is 8-byte aligned, ran
+     * the whole of __start.  arm_fpuconfig() turns the FPU on early, and the
+     * double-word FP load/stores that follow do require the alignment.
+     */
+
     .bss : {
-        . = ALIGN(4);
+        . = ALIGN(8);
         _sbss = ABSOLUTE(.);
         *(.bss .bss.*)
         *(.gnu.linkonce.b.*)
         *(COMMON)
-        . = ALIGN(4);
+        . = ALIGN(8);
         _ebss = ABSOLUTE(.);
     } > sram
 
@@ -165,6 +202,19 @@ SECTIONS
     . = ALIGN(8);
     PROVIDE(end = .);
     PROVIDE(_end = .);
+
+    /* End of the usable RAM region, for up_allocate_heap().
+     *
+     * The heap has to stop where this region stops.  Deriving its end from a
+     * chip constant instead -- 0x280a0000, the top of all six SRAM banks --
+     * handed the allocator 436K running from SRAM2 clear through SRAM5, and
+     * kumm_initialize() writes its bookkeeping at both ends of what it is
+     * given.  The far end of that range is in banks this board will not boot
+     * .bss out of, so the very first thing nx_start() does with our memory
+     * reached into memory that does not behave.
+     */
+
+    PROVIDE(_eram = ORIGIN(sram) + LENGTH(sram));
 
     /* Debug sections */
 

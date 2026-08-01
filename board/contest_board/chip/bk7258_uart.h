@@ -52,6 +52,8 @@
 #define BK7258_UART_DEVSTATUS_OFFSET    0x000c  /* Device status */
 #define BK7258_UART_CONFIG_OFFSET       0x0010  /* Line configuration */
 #define BK7258_UART_FIFO_CONFIG_OFFSET  0x0014  /* FIFO configuration */
+#define BK7258_UART_FLOW_CTRL_OFFSET    0x0028  /* Flow control config */
+#define BK7258_UART_WAKE_CONFIG_OFFSET  0x002c  /* Wake configuration */
 #define BK7258_UART_FIFO_STATUS_OFFSET  0x0018  /* FIFO status */
 #define BK7258_UART_FIFO_PORT_OFFSET    0x001c  /* FIFO data port */
 #define BK7258_UART_INT_ENABLE_OFFSET   0x0020  /* Interrupt enable */
@@ -120,6 +122,8 @@
 #define UART_FIFO_STATUS_TX_EMPTY     (1 << 17) /* Bit 17: TX FIFO empty */
 #define UART_FIFO_STATUS_RX_FULL      (1 << 18) /* Bit 18: RX FIFO full */
 #define UART_FIFO_STATUS_RX_EMPTY     (1 << 19) /* Bit 19: RX FIFO empty */
+#define UART_FIFO_STATUS_RXCNT_SHIFT  (8)       /* Bits 8-15: RX FIFO count */
+#define UART_FIFO_STATUS_RXCNT_MASK   (0xff << UART_FIFO_STATUS_RXCNT_SHIFT)
 #define UART_FIFO_STATUS_WR_READY     (1 << 20) /* Bit 20: Write ready */
 #define UART_FIFO_STATUS_RD_READY     (1 << 21) /* Bit 21: Read ready */
 
