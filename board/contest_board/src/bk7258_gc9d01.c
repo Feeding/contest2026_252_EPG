@@ -358,13 +358,25 @@ int board_lcd_initialize(void)
 {
   extern struct spi_dev_s *bk7258_spibus_initialize(int port);
   extern struct spi_dev_s *bk7258_swspi_initialize(void);
+  extern struct spi_dev_s *bk7258_qspibus_initialize(void);
   const struct gc9d01_cmd_s *c;
   struct gc9d01_dev_s *priv;
   unsigned int i;
   int panel;
 
   g_gc9d01[0].spi = bk7258_spibus_initialize(1);
-  g_gc9d01[1].spi = bk7258_swspi_initialize();
+
+  /* The left eye prefers the QSPI0 hardware path and falls back to the
+   * bit-banged master if the block does not answer, so a QSPI surprise
+   * costs speed, not the eye.
+   */
+
+  g_gc9d01[1].spi = bk7258_qspibus_initialize();
+
+  if (g_gc9d01[1].spi == NULL)
+    {
+      g_gc9d01[1].spi = bk7258_swspi_initialize();
+    }
 
   bk7258_gpio_config(PIN_BACKLIGHT, true, false, false);
   bk7258_gpio_write(PIN_BACKLIGHT, false);
