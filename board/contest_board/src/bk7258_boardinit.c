@@ -34,6 +34,7 @@
 
 #include <nuttx/kmalloc.h>
 #include <syslog.h>
+#include <string.h>
 
 #include "arm_internal.h"
 
@@ -93,10 +94,24 @@ void board_late_initialize(void)
    */
 
   /* Top 32 KB (0x28098000+) stays out of the heap: the camera's YUV
-   * line ping-pong buffer lives there and must be SRAM.
+   * line ping-pong buffer lives at its base and SRAM-resident hot code
+   * (TJpgDec, copied below) at 0x2809d000.
    */
 
   kumm_addregion((void *)0x28050000, 0x28098000 - 0x28050000);
+
+    {
+      extern uint8_t _ssramfunc[];
+      extern uint8_t _esramfunc[];
+      extern uint8_t _fsramfunc[];
+
+      memcpy(_ssramfunc, _fsramfunc, _esramfunc - _ssramfunc);
+
+      /* The copy went through the D-side; drop stale I-side lines. */
+
+      putreg32(0, 0xe000ef50);                      /* ICIALLU */
+      __asm__ __volatile__ ("dsb\n isb" : : : "memory");
+    }
 #endif
 
 #if CONFIG_MM_REGIONS > 2

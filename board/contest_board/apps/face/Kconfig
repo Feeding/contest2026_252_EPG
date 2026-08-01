@@ -1,0 +1,8 @@
+config CONTEST_FACE
+	bool "Contest board robot face demo"
+	default n
+	depends on VIDEO_FB && INPUT_BUTTONS
+	---help---
+		"face" NSH command: procedural eyes idle plus the vendor's
+		MJPEG expression clips from the SD card, S2 to play, S3 to
+		quit.

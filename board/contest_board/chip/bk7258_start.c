@@ -413,6 +413,19 @@ void __start(void)
 
   putreg32((uint32_t)_vectors, NVIC_VECTAB);
 
+  /* The STAR-MC1 core carries real architectural L1 caches and the boot
+   * chain leaves them OFF -- discovered when JPEG decode would not scale
+   * with the core clock (XIP instruction fetches were the wall, ~2 s per
+   * frame at any frequency).  Enable the ICACHE: invalidate-all, then
+   * CCR.IC.  The DCACHE stays off until every DMA consumer does proper
+   * maintenance.
+   */
+
+  putreg32(0, 0xe000ef50);                          /* ICIALLU */
+  __asm__ __volatile__ ("dsb\n isb" : : : "memory");
+  putreg32(getreg32(0xe000ed14) | (1u << 17), 0xe000ed14);
+  __asm__ __volatile__ ("dsb\n isb" : : : "memory");
+
   earlymark('2');
 
   txmark();   /* trace 1b: VTOR set, FPU not yet touched */
