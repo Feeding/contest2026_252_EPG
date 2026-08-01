@@ -28,6 +28,10 @@ if(CONFIG_MMCSD)
   list(APPEND SRCS bk7258_sdio.c)
 endif()
 
+if(CONFIG_I2C_BITBANG)
+  list(APPEND SRCS bk7258_camera.c)
+endif()
+
 if(CONFIG_BK7258_I2C1)
   list(APPEND SRCS bk7258_i2c.c)
 endif()
