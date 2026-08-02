@@ -344,6 +344,34 @@ int bk7258_audio_loopback(bool on)
   return OK;
 }
 
+/****************************************************************************
+ * Name: bk7258_audio_beep
+ *
+ * Description:
+ *   Short 1 kHz cue tone through the DAC (16 samples per cycle at
+ *   16 kHz).  The DAC must already be initialized.
+ *
+ ****************************************************************************/
+
+int bk7258_audio_beep(int ms)
+{
+  static const int16_t cycle[16] =
+  {
+    0, 3061, 5657, 7391, 8000, 7391, 5657, 3061,
+    0, -3061, -5657, -7391, -8000, -7391, -5657, -3061
+  };
+  int n = ms;
+
+  bk7258_audio_dac_start();
+  while (n-- > 0)
+    {
+      bk7258_audio_dac_write(cycle, 16);      /* one cycle = 1 ms */
+    }
+
+  bk7258_audio_dac_stop();
+  return OK;
+}
+
 /* Diagnostic: the analog regs as the hardware actually holds them */
 
 void bk7258_audio_ana_dump(void)

@@ -475,11 +475,23 @@ int main(int argc, char *argv[])
           return 1;
         }
 
+      extern int bk7258_audio_beep(int ms);
+
+      if (bk7258_audio_dac_init(true) != 0)
+        {
+          printf("face: dac init failed\n");
+          free(pairs);
+          free(pcm);
+          return 1;
+        }
+
+      /* The cue is a beep -- the motor buzz went unnoticed in testing */
+
       bk7258_motor_init();
       bk7258_motor_on(30);
-      usleep(150 * 1000);
+      bk7258_audio_beep(300);
       bk7258_motor_off();
-      usleep(800 * 1000);              /* breathe, then record */
+      usleep(300 * 1000);
 
       printf("face: recording %d s...\n", sec);
       bk7258_audio_adc_start();
@@ -505,38 +517,6 @@ int main(int argc, char *argv[])
 
       printf("face: peaks MIC1 %d MIC2 %d -> using %s\n",
              peakl, peakr, peakr > peakl ? "MIC2" : "MIC1");
-
-        {
-          /* Forensics: raw pairs, DC statistics, and the analog regs
-           * as the hardware actually holds them.
-           */
-
-          int64_t sum = 0;
-          int mn = 32767;
-          int mx = -32768;
-
-          printf("face: raw:");
-          for (i = 0; i < 16; i++)
-            {
-              printf(" %08lx", (unsigned long)pairs[i * 100]);
-            }
-
-          printf("\n");
-          for (i = 0; i < total; i++)
-            {
-              int v = (int16_t)(pairs[i] & 0xffff);
-
-              sum += v;
-              if (v < mn) mn = v;
-              if (v > mx) mx = v;
-            }
-
-          extern void bk7258_audio_ana_dump(void);
-
-          printf("face: mic1 dc %ld min %d max %d\n",
-                 (long)(sum / total), mn, mx);
-          bk7258_audio_ana_dump();
-        }
 
       for (i = 0; i < total; i++)
         {
