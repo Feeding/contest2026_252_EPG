@@ -97,6 +97,30 @@
 
 #define QSPI_CHUNK_DATA         240
 
+/* Memory-mapped frame-blast plumbing (vendor MAPPING_MODE): the config
+ * register's three magic bits hand the serializer to the DAHB port, and
+ * a plain mem-to-mem GDMA write into the unit's data window streams out
+ * on 1 wire with AHB backpressure pacing -- zero CPU byte pushing.
+ */
+
+#define QSPI_CMD_A_CFG2_OFFSET  (0x0b << 2)
+#define QSPI_CFG_FORCE_CS_LOW   (1u << 6)
+#define QSPI_CFG_DIS_CMD_SCK    (1u << 16)
+#define QSPI_CFG_IO_MEM_SEL     (1u << 22)
+#define QSPI_STATUS_TX_BUSY     (1u << 14)
+#define QSPI_STATUS_FIFO_EMPTY  (1u << 16)
+
+#define QSPI_WINDOW(port)       ((port) ? 0x68000000ul : 0x64000000ul)
+
+#define GDMA_BASE               0x55020000ul
+#define GDMA_CH(n)              (GDMA_BASE + 0x40 + (n) * 0x40)
+#define GDMA_CH_CTRL(n)         (GDMA_CH(n) + 0x00)
+#define GDMA_CH_DST(n)          (GDMA_CH(n) + 0x04)
+#define GDMA_CH_SRC(n)          (GDMA_CH(n) + 0x08)
+#define GDMA_CH_MUX(n)          (GDMA_CH(n) + 0x1c)
+
+#define QSPI_BLAST_CH(port)     ((port) ? 2 : 1)
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -308,6 +332,123 @@ static struct bk7258_qspi_dev_s g_qspi_devs[2] =
  *
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: bk7258_qspi_blast_start / bk7258_qspi_blast_wait
+ *
+ * Description:
+ *   Stream len bytes from buf straight out of the QSPI unit's 1-wire
+ *   data pin via memory-mapped mode and a mem-to-mem GDMA channel.
+ *   The panel must already be in RAMWR with DC high; CS is forced low
+ *   for the duration.  start returns immediately; wait blocks until
+ *   the wire is idle and restores command mode.
+ *
+ ****************************************************************************/
+
+void bk7258_qspi_map_enter(int port)
+{
+  uintptr_t base = port ? BK7258_QSPI1_BASE : BK7258_QSPI0_BASE;
+
+  /* The vendor zeroes the whole cmd_c block before switching the
+   * serializer to the memory path -- residue from the RAMWR just sent
+   * (start/length bits) otherwise keeps the command engine attached.
+   */
+
+  putreg32(0, base + QSPI_CMD_C_L_OFFSET);
+  putreg32(0, base + QSPI_CMD_C_H_OFFSET);
+  putreg32(0, base + QSPI_CMD_C_CFG1_OFFSET);
+  putreg32(0, base + QSPI_CMD_C_CFG2_OFFSET);
+
+  putreg32(0x80000000, base + QSPI_CMD_A_CFG2_OFFSET);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, 0, QSPI_CFG_FORCE_CS_LOW);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, 0, QSPI_CFG_IO_MEM_SEL);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, 0, QSPI_CFG_DIS_CMD_SCK);
+}
+
+void bk7258_qspi_map_exit(int port)
+{
+  uintptr_t base = port ? BK7258_QSPI1_BASE : BK7258_QSPI0_BASE;
+  uint32_t budget = 200000;
+
+  while (budget-- > 0)
+    {
+      uint32_t sts = getreg32(base + QSPI_STATUS_OFFSET);
+
+      if ((sts & QSPI_STATUS_FIFO_EMPTY) != 0 &&
+          (sts & QSPI_STATUS_TX_BUSY) == 0)
+        {
+          break;
+        }
+    }
+
+  up_udelay(30);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, QSPI_CFG_DIS_CMD_SCK, 0);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, QSPI_CFG_FORCE_CS_LOW, 0);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, QSPI_CFG_IO_MEM_SEL, 0);
+}
+
+void bk7258_qspi_blast_start(int port, const void *buf, size_t len)
+{
+  uintptr_t base = port ? BK7258_QSPI1_BASE : BK7258_QSPI0_BASE;
+  int ch = QSPI_BLAST_CH(port);
+
+  /* Data phase: memory-mapped mode, 1 wire. */
+
+  extern void bk7258_qspi_map_enter(int port);
+  bk7258_qspi_map_enter(port);
+
+  putreg32(0, GDMA_CH_CTRL(ch));
+  putreg32((uint32_t)(uintptr_t)buf, GDMA_CH_SRC(ch));
+  putreg32(QSPI_WINDOW(port), GDMA_CH_DST(ch));
+  /* m2m, SEC attrs; src bursts INC16 from PSRAM but the DESTINATION
+   * must stay single-beat: the mapping window paces the DMA by AHB
+   * backpressure, and burst writes overran it into the void (screens
+   * dark while the CPU's single stores painted fine).
+   */
+
+  putreg32(0x03300000, GDMA_CH_MUX(ch));
+  putreg32(((uint32_t)(len - 1) << 16) | (1u << 9) | (1u << 8) |
+           (2u << 6) | (2u << 4) | 1u, GDMA_CH_CTRL(ch));
+}
+
+int bk7258_qspi_blast_wait(int port)
+{
+  uintptr_t base = port ? BK7258_QSPI1_BASE : BK7258_QSPI0_BASE;
+  int ch = QSPI_BLAST_CH(port);
+  uint32_t budget = 4000000;
+  int ret = OK;
+
+  while ((getreg32(GDMA_CH_CTRL(ch)) & 1u) != 0)
+    {
+      if (--budget == 0)
+        {
+          putreg32(0, GDMA_CH_CTRL(ch));
+          ret = -ETIMEDOUT;
+          break;
+        }
+    }
+
+  /* Let the serializer drain, then hand the pins back. */
+
+  budget = 200000;
+  while (budget-- > 0)
+    {
+      uint32_t sts = getreg32(base + QSPI_STATUS_OFFSET);
+
+      if ((sts & QSPI_STATUS_FIFO_EMPTY) != 0 &&
+          (sts & QSPI_STATUS_TX_BUSY) == 0)
+        {
+          break;
+        }
+    }
+
+  up_udelay(30);
+
+  modifyreg32(base + QSPI_CONFIG_OFFSET, QSPI_CFG_DIS_CMD_SCK, 0);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, QSPI_CFG_FORCE_CS_LOW, 0);
+  modifyreg32(base + QSPI_CONFIG_OFFSET, QSPI_CFG_IO_MEM_SEL, 0);
+  return ret;
+}
+
 struct spi_dev_s *bk7258_qspibus_initialize(int port)
 {
   struct bk7258_qspi_dev_s *priv;
@@ -353,7 +494,7 @@ struct spi_dev_s *bk7258_qspibus_initialize(int port)
     }
 
   qspi_putreg(priv, QSPI_CONFIG_OFFSET,
-              QSPI_CONFIG_EN | QSPI_CONFIG_CLK_RATE(2));
+              QSPI_CONFIG_EN | QSPI_CONFIG_CLK_RATE(0));
 
   /* Only CLK/CSN/IO0 go to the controller; the IO1-IO3 pads of both units
    * have board-assigned day jobs.

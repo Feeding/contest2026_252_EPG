@@ -38,6 +38,7 @@
 #include <nuttx/spi/spi.h>
 
 #include "bk7258_gpio.h"
+#include "arm_internal.h"
 
 #if defined(CONFIG_LCD) && defined(CONFIG_BK7258_SPI1)
 
@@ -348,6 +349,127 @@ static int gc9d01_putarea(struct lcd_dev_s *dev, fb_coord_t row_start,
     }
 
   return OK;
+}
+
+/****************************************************************************
+ * Name: bk7258_gc9d01_blast_start / _wait
+ *
+ * Description:
+ *   Full-frame hardware path for the face player: set the full window,
+ *   issue RAMWR, then hand the wire to the QSPI mapping engine + GDMA.
+ *   devno 0 = viewer-right (QSPI1), devno 1 = viewer-left (QSPI0).
+ *
+ ****************************************************************************/
+
+int bk7258_gc9d01_blast_start(int devno, const void *rgb565)
+{
+  struct gc9d01_dev_s *priv = &g_gc9d01[devno & 1];
+  extern void bk7258_qspi_blast_start(int port, const void *buf,
+                                      size_t len);
+
+  gc9d01_setwindow(priv, 0, 0, GC9D01_XRES - 1, GC9D01_YRES - 1);
+  bk7258_gpio_write(priv->dc_pin, true);
+
+  bk7258_qspi_blast_start((devno & 1) ? 0 : 1, rgb565,
+                          GC9D01_XRES * GC9D01_YRES * 2);
+  return 0;
+}
+
+int bk7258_gc9d01_blast_wait(int devno)
+{
+  extern int bk7258_qspi_blast_wait(int port);
+
+  return bk7258_qspi_blast_wait((devno & 1) ? 0 : 1);
+}
+
+/****************************************************************************
+ * Name: bk7258_gc9d01_blast_pair
+ *
+ * Description:
+ *   Push one full RGB565 frame to EACH panel through the QSPI mapping
+ *   windows with interleaved CPU stores: both 1-wire serializers run
+ *   concurrently, so the wall time is one panel's wire time, not two.
+ *   (The GDMA never managed to reach the windows -- CPU stores, which
+ *   provably do, are just as fast: the wire is the bottleneck either
+ *   way, and AHB backpressure paces the stores.)
+ *
+ ****************************************************************************/
+
+int bk7258_gc9d01_blast_pair(const void *right, const void *left)
+{
+  extern void bk7258_qspi_map_enter(int port);
+  extern void bk7258_qspi_map_exit(int port);
+
+  const uint32_t *r = (const uint32_t *)right;   /* devno 0 -> QSPI1 */
+  const uint32_t *l = (const uint32_t *)left;    /* devno 1 -> QSPI0 */
+  size_t nwords = GC9D01_XRES * GC9D01_YRES * 2 / 4;
+  size_t i;
+
+  gc9d01_setwindow(&g_gc9d01[0], 0, 0, GC9D01_XRES - 1, GC9D01_YRES - 1);
+  bk7258_gpio_write(g_gc9d01[0].dc_pin, true);
+  gc9d01_setwindow(&g_gc9d01[1], 0, 0, GC9D01_XRES - 1, GC9D01_YRES - 1);
+  bk7258_gpio_write(g_gc9d01[1].dc_pin, true);
+
+  bk7258_qspi_map_enter(1);
+  bk7258_qspi_map_enter(0);
+
+  for (i = 0; i < nwords; i++)
+    {
+      /* The mapping engine serializes words low-byte-first while the
+       * panel takes the first byte as a pixel's high byte (three-band
+       * wire test: red->blue, green->red, blue->green).  REV16 each
+       * word so the wire order matches putarea's hand-swapped bytes.
+       */
+
+      uint32_t wr = r[i];
+      uint32_t wl = l[i];
+
+      wr = ((wr & 0xff00ff00ul) >> 8) | ((wr & 0x00ff00fful) << 8);
+      wl = ((wl & 0xff00ff00ul) >> 8) | ((wl & 0x00ff00fful) << 8);
+      putreg32(wr, 0x68000000ul + i * 4);
+      putreg32(wl, 0x64000000ul + i * 4);
+    }
+
+  bk7258_qspi_map_exit(1);
+  bk7258_qspi_map_exit(0);
+  return 0;
+}
+
+/* Diagnostic: same as blast, but the CPU stores every word into the
+ * mapping window itself -- isolates the GDMA from the window/MPC.
+ */
+
+void bk7258_qspi_blast_cpu(int devno, const uint16_t *px, size_t npx)
+{
+  struct gc9d01_dev_s *priv = &g_gc9d01[devno & 1];
+  extern void bk7258_qspi_map_enter(int port);
+  extern void bk7258_qspi_map_exit(int port);
+  int port = (devno & 1) ? 0 : 1;
+  uintptr_t win = port ? 0x68000000ul : 0x64000000ul;
+  size_t i;
+
+  gc9d01_setwindow(priv, 0, 0, GC9D01_XRES - 1, GC9D01_YRES - 1);
+  bk7258_gpio_write(priv->dc_pin, true);
+
+  bk7258_qspi_map_enter(port);
+
+  for (i = 0; i < npx / 2; i++)
+    {
+      putreg32(((const uint32_t *)px)[i], win + i * 4);
+    }
+
+  bk7258_qspi_map_exit(port);
+}
+
+/* Diagnostic: full-frame push through the putarea reference path (the
+ * byte-swapping command-mode route proven correct in the eyes era).
+ */
+
+int bk7258_gc9d01_putfull(int devno, const void *rgb565)
+{
+  return gc9d01_putarea((struct lcd_dev_s *)&g_gc9d01[devno & 1], 0,
+                        GC9D01_YRES - 1, 0, GC9D01_XRES - 1,
+                        (const uint8_t *)rgb565, GC9D01_XRES * 2);
 }
 
 static int gc9d01_getrun(struct lcd_dev_s *dev, fb_coord_t row,
