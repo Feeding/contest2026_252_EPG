@@ -821,7 +821,22 @@ int main(int argc, char *argv[])
             }
 
             {
+              extern int bk7258_ble_txpwr(int idx);
               extern int bk7258_ble_adv_start(const char *name);
+
+              /* face BT 5 [idx]: report the power index, and override
+               * it when one is given, before going on the air.
+               */
+
+              extern void bk7258_bt_rf_diag(void);
+
+              /* argv[2] is the stage, so the optional power override
+               * is argv[3] -- reading the stage as an index is how an
+               * earlier run silently forced the transmitter to 5.
+               */
+
+              bk7258_bt_rf_diag();
+              bk7258_ble_txpwr(argc > 3 ? atoi(argv[3]) : -1);
               int aret = bk7258_ble_adv_start("openvela-EPG");
 
               printf("face: advertising -> %d (%s)\n", aret,
