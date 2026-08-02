@@ -341,6 +341,8 @@ struct bt_osi_timer_s
  */
 
 extern uint8_t manual_cal_get_ble_pwr_idx(uint8_t channel);
+
+static uint8_t bt_osi_ble_pwr_idx(uint8_t channel);
 extern void ble_cal_set_txpwr(uint8_t idx);
 extern void ble_cal_recover_txpwr(void);
 extern void ble_cal_enter_txpwr(void);
@@ -1996,7 +1998,7 @@ struct bt_osi_funcs_t g_bt_osi_funcs =
   ._get_bluetooth_mac                   = bt_osi_get_bluetooth_mac,
   ._uart_write_byte                     = bt_osi_uart_write_byte,
   ._register_ble_dump_hook              = bt_osi_register_ble_dump_hook,
-  ._get_ble_pwr_idx                     = manual_cal_get_ble_pwr_idx,
+  ._get_ble_pwr_idx                     = bt_osi_ble_pwr_idx,
   ._ble_cal_set_txpwr                   = ble_cal_set_txpwr,
   ._ble_cal_recover_txpwr               = ble_cal_recover_txpwr,
   ._ble_cal_enter_txpwr                 = ble_cal_enter_txpwr,
@@ -2079,6 +2081,30 @@ struct bt_osi_funcs_t g_bt_osi_funcs =
  *   lines.  Bits 7/8/9 of the routing word are DM/BLE/BT.
  *
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: bt_osi_ble_pwr_idx
+ *
+ * Description:
+ *   The controller asks for a transmit level per channel and applies
+ *   the answer itself, so this callback is the only place a level
+ *   actually sticks -- setting one before advertising starts is
+ *   overwritten on the first event, which is why an earlier override
+ *   proved nothing.  The library's own answer comes from a calibration
+ *   that had no factory record and read TSSI with the transmitter
+ *   possibly unkeyed, so a plausible-looking index can still mean no
+ *   output.  Clamp upward while the receiver works and nothing hears
+ *   the transmitter; if this is what carries, the calibrated value is
+ *   the thing to fix rather than this floor.
+ *
+ ****************************************************************************/
+
+static uint8_t bt_osi_ble_pwr_idx(uint8_t channel)
+{
+  uint8_t idx = manual_cal_get_ble_pwr_idx(channel);
+
+  return idx < 60 ? 60 : idx;
+}
 
 void bk7258_bt_rf_diag(void)
 {
