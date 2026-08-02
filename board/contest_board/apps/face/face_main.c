@@ -12,11 +12,8 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
-#include <nuttx/video/fb.h>
 #include <nuttx/input/buttons.h>
 
-#include <sys/ioctl.h>
-#include <sys/mman.h>
 #include <sys/mount.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -48,18 +45,6 @@
 #define PLAY_NEXT  2                   /* S2: cut to the next clip */
 
 /****************************************************************************
- * Private Types
- ****************************************************************************/
-
-struct eye_fb_s
-{
-  int fd;
-  uint16_t *mem;
-  size_t len;
-  int stride_px;
-};
-
-/****************************************************************************
  * Private Data
  ****************************************************************************/
 
@@ -71,65 +56,10 @@ static const char *g_exprs[] =
 
 #define NEXPRS (sizeof(g_exprs) / sizeof(g_exprs[0]))
 
-static struct eye_fb_s g_eye[2];
 static btn_buttonset_t g_btn_last;
 static uint8_t *g_yuyv;
 static uint8_t *g_rgbl;
 static uint8_t *g_rgbr;
-
-/* Packed YUYV 4:2:2 (hardware decoder output) to RGB565, split down
- * the frame's middle onto the two panels.  Integer BT.601.
- */
-
-static void yuyv_to_panels(const uint8_t *src)
-{
-  int x;
-  int y;
-
-  for (y = 0; y < EYE_YRES; y++)
-    {
-      uint16_t *l = g_eye[1].mem + y * g_eye[1].stride_px;
-      uint16_t *r = g_eye[0].mem + y * g_eye[0].stride_px;
-
-      for (x = 0; x < AVI_W; x += 2)
-        {
-          /* Byte order forensics (hw dump vs host ground truth, error 55
-           * vs 44647 for the runner-up): the decoder emits V Y0 U Y1,
-           * whatever the documentation calls format 0.
-           */
-
-          int v  = src[0] - 128;
-          int y0 = src[1];
-          int u  = src[2] - 128;
-          int y1 = src[3];
-          int rr = (359 * v) >> 8;
-          int gg = (88 * u + 183 * v) >> 8;
-          int bb = (454 * u) >> 8;
-          uint16_t *dst = (x < EYE_XRES) ? &l[x] : &r[x - EYE_XRES];
-          int c;
-          int p0;
-          int p1;
-
-          c = y0 + rr; if (c < 0) c = 0; else if (c > 255) c = 255;
-          p0 = (c & 0xf8) << 8;
-          c = y0 - gg; if (c < 0) c = 0; else if (c > 255) c = 255;
-          p0 |= (c & 0xfc) << 3;
-          c = y0 + bb; if (c < 0) c = 0; else if (c > 255) c = 255;
-          p0 |= c >> 3;
-
-          c = y1 + rr; if (c < 0) c = 0; else if (c > 255) c = 255;
-          p1 = (c & 0xf8) << 8;
-          c = y1 - gg; if (c < 0) c = 0; else if (c > 255) c = 255;
-          p1 |= (c & 0xfc) << 3;
-          c = y1 + bb; if (c < 0) c = 0; else if (c > 255) c = 255;
-          p1 |= c >> 3;
-
-          dst[0] = (uint16_t)p0;
-          dst[1] = (uint16_t)p1;
-          src += 4;
-        }
-    }
-}
 
 /****************************************************************************
  * Private Functions
@@ -141,41 +71,6 @@ static uint32_t now_ms(void)
 
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
-
-static int eye_open(struct eye_fb_s *e, const char *path)
-{
-  struct fb_planeinfo_s pinfo;
-
-  e->fd = open(path, O_RDWR);
-  if (e->fd < 0)
-    {
-      printf("face: cannot open %s\n", path);
-      return -1;
-    }
-
-  if (ioctl(e->fd, FBIOGET_PLANEINFO, (unsigned long)(uintptr_t)&pinfo) < 0)
-    {
-      close(e->fd);
-      return -1;
-    }
-
-  e->len = pinfo.fblen;
-  e->stride_px = pinfo.stride / 2;
-  e->mem = mmap(NULL, pinfo.fblen, PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_FILE, e->fd, 0);
-  return (e->mem == MAP_FAILED) ? -1 : 0;
-}
-
-static void eye_flush_full(struct eye_fb_s *e)
-{
-  struct fb_area_s area;
-
-  area.x = 0;
-  area.y = 0;
-  area.w = EYE_XRES;
-  area.h = EYE_YRES;
-  ioctl(e->fd, FBIO_UPDATE, (unsigned long)(uintptr_t)&area);
 }
 
 /****************************************************************************
@@ -307,20 +202,9 @@ static int play_avi(const char *name, int btnfd)
               continue;
             }
 
+          if (read(fd, chunk, size) != (ssize_t)size)
             {
-              static int fno;
-              uint32_t tr = now_ms();
-
-              if (read(fd, chunk, size) != (ssize_t)size)
-                {
-                  goto out;
-                }
-
-              if ((++fno % 30) == 0)
-                {
-                  printf("[r%lu", (unsigned long)(now_ms() - tr));
-                  fflush(stdout);
-                }
+              goto out;
             }
 
           if ((size & 1) != 0)
@@ -338,35 +222,13 @@ static int play_avi(const char *name, int btnfd)
               extern int bk7258_gc9d01_blast_pair(const void *right,
                                                   const void *left);
 
+              if (bk7258_jpegdec_decode(chunk, size, g_yuyv,
+                                        AVI_W, EYE_YRES) == 0 &&
+                  bk7258_dma2d_split(g_yuyv, g_rgbl, g_rgbr) == 0)
                 {
-                  uint32_t ta = now_ms();
-                  int okd = bk7258_jpegdec_decode(chunk, size, g_yuyv,
-                                                  AVI_W, EYE_YRES);
-                  uint32_t tb = now_ms();
-                  int okc = (okd == 0) ?
-                    bk7258_dma2d_split(g_yuyv, g_rgbl, g_rgbr) : -1;
-                  uint32_t tc = now_ms();
-
-                  if (okc == 0)
-                    {
-                      bk7258_gc9d01_blast_pair(g_rgbr, g_rgbl);
-                    }
-
-                    {
-                      static int fno2;
-
-                      if ((++fno2 % 30) == 0)
-                        {
-                          printf(" d%lu c%lu b%lu]",
-                                 (unsigned long)(tb - ta),
-                                 (unsigned long)(tc - tb),
-                                 (unsigned long)(now_ms() - tc));
-                          fflush(stdout);
-                        }
-                    }
+                  bk7258_gc9d01_blast_pair(g_rgbr, g_rgbl);
                 }
             }
-
 
           ev = btn_event(btnfd);
           if (ev != 0)
@@ -404,13 +266,6 @@ int main(int argc, char *argv[])
 {
   int btnfd;
   int cur = -1;                        /* -1 = NEUTRAL idle loop */
-  int i;
-
-  if (eye_open(&g_eye[0], "/dev/fb0") < 0 ||
-      eye_open(&g_eye[1], "/dev/fb1") < 0)
-    {
-      return 1;
-    }
 
   mount("/dev/mmcsd0", "/mnt", "vfat", 0, NULL);
 
@@ -595,55 +450,6 @@ int main(int argc, char *argv[])
       return 0;
     }
 
-  if (argc > 1 && strcmp(argv[1], "BLAST") == 0)
-    {
-      /* Display-path discriminator: solid colors pushed through the
-       * mapping mode by CPU stores (no DMA).  Left panel red, right
-       * blue.  A bus fault here = MPC blocks the data window.
-       */
-
-      extern int bk7258_gc9d01_blast_start(int devno, const void *buf);
-      extern int bk7258_gc9d01_blast_wait(int devno);
-      uint16_t *solid = malloc(EYE_XRES * EYE_YRES * 2);
-      int devno;
-      int i;
-
-      if (solid == NULL)
-        {
-          return 1;
-        }
-
-      for (devno = 0; devno < 2; devno++)
-        {
-          uint16_t c = devno ? 0xf800 : 0x001f;   /* red / blue */
-
-          for (i = 0; i < EYE_XRES * EYE_YRES; i++)
-            {
-              solid[i] = (uint16_t)(c << 8 | c >> 8);
-            }
-
-          printf("face: blast panel %d via CPU stores...\n", devno);
-
-            {
-              /* Replicate blast_start's window+RAMWR+mapping entry,
-               * then CPU-write the window instead of DMA.
-               */
-
-              extern void bk7258_qspi_blast_cpu(int devno,
-                                                const uint16_t *px,
-                                                size_t npx);
-
-              bk7258_qspi_blast_cpu(devno, solid,
-                                    EYE_XRES * EYE_YRES);
-            }
-
-          printf("face: panel %d done\n", devno);
-        }
-
-      printf("face: BLAST test complete -- look at the screens\n");
-      return 0;
-    }
-
   if (argc > 3 && strcmp(argv[1], "RECV") == 0)
     {
       /* Raw file upload over the console: exactly <size> bytes follow,
@@ -689,110 +495,6 @@ int main(int argc, char *argv[])
       close(fd);
       free(buf);
       printf("\nface: recv done\n");
-      return 0;
-    }
-
-  if (argc > 1 && strcmp(argv[1], "DUMP") == 0)
-    {
-      /* Decode the first NEUTRAL frame and drop the raw decoder output
-       * on the card for host-side byte-order forensics.
-       */
-
-      extern int bk7258_jpegdec_decode(const uint8_t *jpg, size_t len,
-                                       uint8_t *out, int width,
-                                       int height);
-      uint8_t *chunk = malloc(CHUNK_MAX);
-      int fd = open("/mnt/NEUTRAL.AVI", O_RDONLY);
-      uint32_t hdr[3];
-      int r = -1;
-
-      if (fd < 0 || chunk == NULL)
-        {
-          printf("face: dump setup failed\n");
-          return 1;
-        }
-
-      read(fd, hdr, 12);
-
-      for (; ; )
-        {
-          if (read(fd, hdr, 8) != 8)
-            {
-              break;
-            }
-
-          if (hdr[0] == 0x5453494c)
-            {
-              uint32_t lt;
-              read(fd, &lt, 4);
-              if (lt == 0x69766f6d)
-                {
-                  continue;
-                }
-
-              lseek(fd, hdr[1] - 4 + (hdr[1] & 1), SEEK_CUR);
-            }
-          else if (hdr[0] == 0x63643030)
-            {
-              read(fd, chunk, hdr[1]);
-              r = bk7258_jpegdec_decode(chunk, hdr[1], g_yuyv,
-                                        AVI_W, EYE_YRES);
-              break;
-            }
-          else
-            {
-              lseek(fd, hdr[1] + (hdr[1] & 1), SEEK_CUR);
-            }
-        }
-
-      close(fd);
-      printf("face: decode=%d\n", r);
-
-      if (r == 0)
-        {
-          int out = open("/mnt/yuv.bin", O_WRONLY | O_CREAT | O_TRUNC,
-                         0666);
-          write(out, g_yuyv, AVI_W * EYE_YRES * 2);
-          close(out);
-          printf("face: yuv.bin written\n");
-        }
-
-      free(chunk);
-      return 0;
-    }
-
-  if (argc > 1 && strcmp(argv[1], "BENCH") == 0)
-    {
-      /* Fetch-path discriminator: the same tight countdown loop timed
-       * once running from XIP flash and once from a copy in SRAM.
-       * subs r0,#1 ; bne .-2 ; bx lr
-       */
-
-      static uint16_t code[4] __attribute__((aligned(4))) =
-      {
-        0x3801, 0xd1fd, 0x4770, 0xbf00
-      };
-
-      uint32_t (*fn)(uint32_t);
-      volatile uint32_t n;
-      uint32_t t0;
-      uint32_t t_flash;
-      uint32_t t_sram;
-
-      t0 = now_ms();
-      for (n = 10000000; n > 0; n--)
-        {
-        }
-
-      t_flash = now_ms() - t0;
-
-      fn = (uint32_t (*)(uint32_t))((uintptr_t)code | 1);
-      t0 = now_ms();
-      fn(10000000);
-      t_sram = now_ms() - t0;
-
-      printf("face: bench flash-loop=%lums sram-loop=%lums\n",
-             (unsigned long)t_flash, (unsigned long)t_sram);
       return 0;
     }
 
@@ -843,12 +545,6 @@ int main(int argc, char *argv[])
           printf("face: cannot play %s, back to idle\n", name);
           cur = -1;
         }
-    }
-
-  for (i = 0; i < 2; i++)
-    {
-      munmap(g_eye[i].mem, g_eye[i].len);
-      close(g_eye[i].fd);
     }
 
   if (btnfd >= 0)
