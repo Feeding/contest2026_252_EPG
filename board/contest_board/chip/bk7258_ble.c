@@ -23,7 +23,6 @@ extern int  bluetooth_controller_init(void);
 extern int  bk_ble_reg_hci_recv_callback(int (*evt_cb)(uint8_t *, uint16_t),
                                          int (*acl_cb)(uint8_t *, uint16_t));
 extern int  bk_ble_hci_cmd_to_controller(uint8_t *buf, uint16_t len);
-extern int  bk_ble_create_advertising(void);
 extern int  bt_feature_adapter_init(void *arg);
 extern int  phy_adapter_init(void *funcs, void *vars);
 extern void rf_adapter_init(const void *funcs, const void *vars);
@@ -531,7 +530,6 @@ uintptr_t bk7258_ble_link_probe(void)
          (uintptr_t)bluetooth_controller_init +
          (uintptr_t)bk_ble_reg_hci_recv_callback +
          (uintptr_t)bk_ble_hci_cmd_to_controller +
-         (uintptr_t)bk_ble_create_advertising +
          (uintptr_t)phy_adapter_init +
          (uintptr_t)rf_adapter_init +
          (uintptr_t)calibration_init +
