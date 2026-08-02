@@ -354,6 +354,8 @@ static int ble_hci_acl_cb(uint8_t *buf, uint16_t len)
   return 0;
 }
 
+static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen);
+
 static int hci_register_once(void)
 {
   static int s_registered;
@@ -369,8 +371,16 @@ static int hci_register_once(void)
     }
 
   s_registered = 1;
+
   return 0;
 }
+
+/* LE_Set_Event_Mask is deliberately never sent.  This controller
+ * delivers advertising reports on its power-on default and stops
+ * delivering them after any 0x2001, including the Core spec's own
+ * default value of 0x1f -- verified both ways on hardware.
+ */
+
 
 static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
 {
@@ -667,6 +677,16 @@ int bk7258_ble_adv_start(const char *name)
          hci_cmd(0x2006, adv_params, sizeof(adv_params)));
   syslog(LOG_INFO, "hci: adv_data -> %d\n",
          hci_cmd(0x2008, adv_data, 32));
+
+  /* Vote the radio open for bluetooth before keying the transmitter.
+   * The controller is supposed to do this itself through the OSI
+   * table; asking again is idempotent in the arbiter and costs one
+   * call, and the PHY's own "rf off" note during the synthesiser
+   * switch is reason enough not to assume it happened.
+   */
+
+  rf_module_vote_ctrl(1, 1u << 1);        /* RF_OPEN, RF_BY_BLE_BIT */
+  syslog(LOG_INFO, "ble: rf vote open issued\n");
 
   ret = hci_cmd(0x200a, &enable, 1);
   syslog(LOG_INFO, "hci: adv_enable -> %d\n", ret);
