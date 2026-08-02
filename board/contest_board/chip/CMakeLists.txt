@@ -48,4 +48,18 @@ if(CONFIG_BK7258_UART0 OR CONFIG_BK7258_UART1 OR CONFIG_BK7258_UART2)
   list(APPEND SRCS bk7258_serial.c)
 endif()
 
+# Closed-source BLE controller/host + RF PHY archives (Beken bk_idk on the
+# build host; ABI: armv8-m.main / fpv5-sp-d16 / hard float, verified).  The
+# BLE staging compiles only when the SDK checkout is present.
+
+set(BK_IDK_LIBS /Users/apple/app/github.com/bk_idk/components/bk_libs/bk7258/libs)
+
+if(EXISTS ${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
+  list(APPEND SRCS bk7258_ble.c bk7258_ble_shim.c bk7258_vnd_cal.c)
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_host_ble.a)
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libbk_phy.a)
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libcom_phy.a)
+endif()
+
 target_sources(arch PRIVATE ${SRCS})
