@@ -715,7 +715,9 @@ int main(int argc, char *argv[])
        *                                anything votes for the radio)
        *   4  + start the controller   (powers the radio; first step
        *                                that can genuinely hang)
-       *   5  + advertise over raw HCI (on the air, phone-visible)
+       *   5  + advertise over raw HCI (transmitter enabled)
+       *   6  + scan for other advertisers (radio self-test)
+       *   7  + RF calibration (faults: needs a SARADC driver)
        *
        * Stage 3 runs on a thread below this one so that a controller
        * that never returns leaves the console alive to say so, instead
@@ -797,6 +799,25 @@ int main(int argc, char *argv[])
           if (g_bt_ctrl_ret != 0 || stage < 5)
             {
               return g_bt_ctrl_ret == 0 ? 0 : 1;
+            }
+
+          if (stage >= 7)
+            {
+              extern int bk7258_bt_cal_init(void);
+
+              printf("face: calibrating (known to fault today)...\n");
+              printf("face: cal -> %d\n", bk7258_bt_cal_init());
+              return 0;
+            }
+
+          if (stage >= 6)
+            {
+              extern int bk7258_ble_scan(int seconds);
+              int n = bk7258_ble_scan(10);
+
+              printf("face: scan heard %d advertisers (%s)\n", n,
+                     n > 0 ? "RADIO WORKS" : "nothing -- radio suspect");
+              return n > 0 ? 0 : 1;
             }
 
             {
