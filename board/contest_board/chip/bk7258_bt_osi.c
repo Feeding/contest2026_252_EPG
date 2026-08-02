@@ -1786,21 +1786,19 @@ static uint32_t bt_osi_get_test_rfconfig(void)
 
 static uint8_t bt_osi_get_rf_mode(void)
 {
-  /* The vendor derives this from rwnx_rfconfig, and doing the same
-   * here answers BT_RF_MODE_WIFI: the variable reads 0x101 on this
-   * board, meaning PLL and role both Wi-Fi.  That is the Wi-Fi PHY
-   * archive's own default, and it is the archive we link -- the
-   * vendor's no-Wi-Fi build takes libcom_phy.a instead.  Answering it
-   * honestly points the transmitter at a Wi-Fi PLL that nothing on
-   * this port ever starts, which is exactly the shape of the symptom:
-   * the receiver hears the room and nothing hears us.
-   *
-   * A BLE-only board runs its own polar modulator, so say so.  The
-   * architecturally clean fix is to link libcom_phy.a instead, which
-   * would make this derivation correct again.
-   */
+  uint32_t cfg = rwnx_rfconfig;
 
-  return BT_RF_MODE_POLAR;
+  if ((cfg & BLUETOOTH_RF_PLL_MASK) == BLUETOOTH_RF_PLL_WIFI)
+    {
+      return BT_RF_MODE_WIFI;
+    }
+
+  if ((cfg & BLUETOOTH_RF_MODE_MASK) == BLUETOOTH_RF_MODE_POLAR)
+    {
+      return BT_RF_MODE_POLAR;
+    }
+
+  return 0;
 }
 
 /****************************************************************************

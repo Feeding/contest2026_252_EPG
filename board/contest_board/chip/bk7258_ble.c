@@ -159,6 +159,40 @@ extern int  bk_cal_if_init(void);
 extern const uint32_t pwr_gain_base_gain_b;
 extern const uint32_t pwr_gain_base_gain_g;
 
+/****************************************************************************
+ * Name: bk7258_ble_use_bt_pll
+ *
+ * Description:
+ *   Point the transceiver at bluetooth's own synthesiser instead of the
+ *   Wi-Fi one.  rwnx_rfconfig comes up 0x101 here -- PLL and role both
+ *   Wi-Fi -- because the archive this port links is the Wi-Fi PHY, and
+ *   the controller library in this SDK has no polar mode to fall back
+ *   on (ble_enter_polar_mode exists only in the newer AVDK tree).  So
+ *   the transmitter reaches for a Wi-Fi PLL that a BLE-only build never
+ *   starts, which is the shape of the symptom: the receiver hears the
+ *   room, nothing hears the transmitter, and enabling advertising takes
+ *   the receiver down with it.
+ *
+ *   The Wi-Fi stack hands the synthesiser over with this call during
+ *   coexistence; with no Wi-Fi here we make the same request directly.
+ *   Must run before the controller initialises the transceiver.
+ *
+ ****************************************************************************/
+
+extern int rwnx_cal_set_rfconfig_BTPLL(void);
+extern volatile uint16_t rwnx_rfconfig;
+
+int bk7258_ble_use_bt_pll(void)
+{
+  int ret;
+
+  syslog(LOG_INFO, "ble: rfconfig before %04x\n", rwnx_rfconfig);
+  ret = rwnx_cal_set_rfconfig_BTPLL();
+  syslog(LOG_INFO, "ble: set BTPLL -> %d, rfconfig now %04x\n",
+         ret, rwnx_rfconfig);
+  return ret;
+}
+
 int bk7258_bt_cal_init(void)
 {
   static const struct auto_pwr_cali_s auto_pwr =
@@ -229,15 +263,54 @@ static int ble_hci_evt_cb(uint8_t *buf, uint16_t len)
    * and RSSI as the last byte.
    */
 
-  if (len >= 12 && buf[0] == 0x3e && buf[2] == 0x02)
+  if (len >= 13 && buf[0] == 0x3e && buf[2] == 0x02)
     {
-      uint8_t dlen = buf[11];
-      int8_t rssi = (len >= 13 + dlen) ? (int8_t)buf[12 + dlen] : 0;
+      /* Report layout after the meta header and report count: event
+       * type, address type, six address bytes, data length, the data
+       * itself, then RSSI.  An earlier version started the address one
+       * byte early, which is why every RSSI it printed was nonsense.
+       */
+
+      uint8_t atype = buf[5];
+      uint8_t *addr = buf + 6;
+      uint8_t dlen = buf[12];
+      int8_t rssi = (len > 13 + dlen) ? (int8_t)buf[13 + dlen] : 0;
+      char nm[32];
+      int nlen = 0;
+      int i = 13;
+
+      nm[0] = '\0';
+      while (i + 1 < 13 + dlen)
+        {
+          uint8_t alen = buf[i];
+          uint8_t atyp = buf[i + 1];
+
+          if (alen == 0)
+            {
+              break;
+            }
+
+          if ((atyp == 0x09 || atyp == 0x08) && alen > 1)
+            {
+              nlen = alen - 1;
+              if (nlen > 30)
+                {
+                  nlen = 30;
+                }
+
+              memcpy(nm, buf + i + 2, nlen);
+              nm[nlen] = '\0';
+              break;
+            }
+
+          i += alen + 1;
+        }
 
       g_adv_reports++;
       syslog(LOG_INFO,
-             "ble: heard %02x:%02x:%02x:%02x:%02x:%02x rssi %d\n",
-             buf[10], buf[9], buf[8], buf[7], buf[6], buf[5], rssi);
+             "ble: %02x:%02x:%02x:%02x:%02x:%02x t%u %ddBm %s\n",
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0],
+             atype, rssi, nlen ? nm : "-");
       return 0;
     }
 
@@ -306,7 +379,7 @@ static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
   syslog(LOG_INFO, "hci: cmd %04x sent (%u bytes)\n", opcode,
          (unsigned)(plen + 3));
 
-  for (waited = 0; waited < 500 && g_hci_evt == 0; waited++)
+  for (waited = 0; waited < 1500 && g_hci_evt == 0; waited++)
     {
       usleep(10 * 1000);
     }
@@ -433,7 +506,7 @@ int bk7258_ble_adv_start(const char *name)
     0xa0, 0x00,             /* min interval, 160 * 0.625 ms = 100 ms */
     0xa0, 0x00,             /* max interval */
     0x00,                   /* ADV_IND, connectable undirected */
-    0x00,                   /* own address: public */
+    0x01,                   /* own address: random -- see below */
     0x00,                   /* peer address type */
     0, 0, 0, 0, 0, 0,       /* peer address, unused for undirected */
     0x07,                   /* all three advertising channels */
@@ -488,6 +561,24 @@ int bk7258_ble_adv_start(const char *name)
   syslog(LOG_INFO, "hci: probe le_read_local_features -> %d\n",
          hci_cmd(0x2003, NULL, 0));
 
+  /* Advertise from a static random address, which is what the product
+   * firmware for this board does: its source sets own_addr_type to
+   * random with the public option commented out beside it.  Nothing
+   * here confirms the controller ever adopted a usable public address,
+   * and enabling advertising with a declared address type that has no
+   * address behind it is rejected outright -- error 0x12 -- so this
+   * command has to come first.  The top two bits of the last byte mark
+   * the address static random, as the vendor also does.
+   */
+
+    {
+      uint8_t rnd[6] = { 0x26, 0x20, 0x25, 0x8c, 0x47, 0xc8 };
+
+      rnd[5] |= 0xc0;
+      syslog(LOG_INFO, "hci: set_random_addr -> %d\n",
+             hci_cmd(0x2005, rnd, 6));
+    }
+
   syslog(LOG_INFO, "hci: adv_params -> %d\n",
          hci_cmd(0x2006, adv_params, sizeof(adv_params)));
   syslog(LOG_INFO, "hci: adv_data -> %d\n",
@@ -525,6 +616,7 @@ uintptr_t bk7258_ble_link_probe(void)
          (uintptr_t)bk7258_ble_adv_start +
          (uintptr_t)bk7258_ble_scan +
          (uintptr_t)bk7258_bt_cal_init +
+         (uintptr_t)bk7258_ble_use_bt_pll +
          (uintptr_t)bk7258_ble_txpwr +
          (uintptr_t)bt_os_adapter_init +
          (uintptr_t)bluetooth_controller_init +
