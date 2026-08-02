@@ -22,6 +22,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sched.h>
 
 
 
@@ -261,6 +263,22 @@ out:
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+/* Controller bring-up runs off the console thread so a hang is a
+ * report rather than a dead board.  state: 1 = running, 2 = returned.
+ */
+
+static volatile int g_bt_ctrl_state;
+static volatile int g_bt_ctrl_ret;
+
+static void *bt_ctrl_thread(void *arg)
+{
+  extern int bk7258_bt_controller_init(void);
+
+  g_bt_ctrl_ret = bk7258_bt_controller_init();
+  g_bt_ctrl_state = 2;
+  return NULL;
+}
 
 int main(int argc, char *argv[])
 {
@@ -689,18 +707,75 @@ int main(int argc, char *argv[])
 
   if (argc > 1 && strcmp(argv[1], "BT") == 0)
     {
-      /* First execution of closed BLE code, deliberately the smallest
-       * step that exists: registering the OSI table is a version and
-       * size handshake inside the library that touches no hardware, so
-       * a mismatch comes back as an error code instead of a hang.
+      /* Staged BLE bring-up: face BT [stage], default 1.
+       *   1  register the OSI table   (pure handshake, no hardware)
+       *   2  + feature flags          (pure handshake)
+       *   3  + start the controller   (powers the radio; first step
+       *                                that can genuinely hang)
+       *
+       * Stage 3 runs on a thread below this one so that a controller
+       * that never returns leaves the console alive to say so, instead
+       * of taking the board down with it.
        */
 
       extern int bk7258_bt_osi_init(void);
-      int ret = bk7258_bt_osi_init();
+      extern int bk7258_bt_feature_init(void);
+      extern int bk7258_bt_controller_init(void);
 
-      printf("face: bt_os_adapter_init -> %d (%s)\n", ret,
-             ret == 0 ? "table accepted" : "REJECTED");
-      return ret == 0 ? 0 : 1;
+      int stage = (argc > 2) ? atoi(argv[2]) : 1;
+      int ret;
+
+      ret = bk7258_bt_osi_init();
+      printf("face: bt osi -> %d (%s)\n", ret,
+             ret == 0 ? "accepted" : "REJECTED");
+      if (ret != 0 || stage < 2)
+        {
+          return ret == 0 ? 0 : 1;
+        }
+
+      ret = bk7258_bt_feature_init();
+      printf("face: bt feature -> %d (%s)\n", ret,
+             ret == 0 ? "accepted" : "REJECTED");
+      if (ret != 0 || stage < 3)
+        {
+          return ret == 0 ? 0 : 1;
+        }
+
+        {
+          pthread_t tid;
+          pthread_attr_t attr;
+          struct sched_param sp;
+          int waited;
+
+          g_bt_ctrl_state = 1;
+          pthread_attr_init(&attr);
+          sp.sched_priority = 90;
+          pthread_attr_setschedparam(&attr, &sp);
+          pthread_attr_setstacksize(&attr, 8192);
+
+          printf("face: bt controller starting...\n");
+          if (pthread_create(&tid, &attr, bt_ctrl_thread, NULL) != 0)
+            {
+              printf("face: cannot spawn controller thread\n");
+              return 1;
+            }
+
+          for (waited = 0; waited < 100 && g_bt_ctrl_state == 1; waited++)
+            {
+              usleep(100 * 1000);
+            }
+
+          if (g_bt_ctrl_state == 1)
+            {
+              printf("face: bt controller STILL RUNNING after 10 s -- "
+                     "hung inside the closed init\n");
+              return 1;
+            }
+
+          printf("face: bt controller -> %d (%s)\n", g_bt_ctrl_ret,
+                 g_bt_ctrl_ret == 0 ? "UP" : "failed");
+          return g_bt_ctrl_ret == 0 ? 0 : 1;
+        }
     }
 
   if (argc > 1 && strcmp(argv[1], "VIBE") == 0)
