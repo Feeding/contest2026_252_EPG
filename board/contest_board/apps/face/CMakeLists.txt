@@ -11,7 +11,6 @@ if(CONFIG_CONTEST_FACE)
     face
     SRCS
     face_main.c
-    tjpgd.c
     STACKSIZE
     8192
     PRIORITY
