@@ -112,20 +112,30 @@ int bk7258_bt_feature_init(void)
  *   vendor tree, so the overlay passes 0 and the two GPIO numbers go
  *   unused.
  *
+ *   Two separate things had to be fixed before this could run, and only
+ *   one of them was the ADC.
+ *
  *   The SARADC callbacks calibration needs -- TSSI power on channel 8,
  *   die temperature on 7, supply on 0 -- are now real, driven by
  *   bk7258_saradc.c, so the trim is solved against measurements rather
- *   than against stubs that reported failure.  That was a prerequisite,
- *   but calling it the cause of the UsageFault this path used to take
- *   does not survive checking: a divide by zero cannot fault here,
- *   because nothing in this tree sets CCR.DIV_0_TRP and the reset
- *   default leaves an integer divide by zero returning zero quietly.
- *   Whether the fault is gone is therefore an open question, and this
- *   stays off the default path until a board run answers it.  If it
- *   still faults, read CFSR rather than assuming: the calibration
- *   writes the TRX block at 0x4980c000 directly, which needs the RF
- *   domain and modem clock this function's first two table votes are
- *   supposed to have raised.
+ *   than against stubs that reported failure.  Necessary, but it was
+ *   never the cause of the UsageFault: nothing in this tree sets
+ *   CCR.DIV_0_TRP, so a divide by zero here returns zero quietly rather
+ *   than faulting.  CFSR read 0x00020000 -- UFSR.INVSTATE, a branch to an
+ *   address with the Thumb bit clear -- with R3 zero.
+ *
+ *   That was nv_init, three statements into calibration_main, tail-calling
+ *   a null _nv_phy_reg_set_hook; see the entry of that name in
+ *   bk7258_phy_osi.c for why the table had a hole exactly there.  It is
+ *   filled in now, and it was the only reachable hole: with --gc-sections
+ *   applied, that entry was the one null slot any surviving code could
+ *   still call.
+ *
+ *   Still unproven on hardware, so this stays off the default path.  If it
+ *   faults again, read CFSR rather than assuming: calibration writes the
+ *   TRX block at 0x4980c000 directly, which needs the RF domain and modem
+ *   clock this function's first two table votes are supposed to raise, and
+ *   that would show as a bus fault, not INVSTATE.
  *
  ****************************************************************************/
 

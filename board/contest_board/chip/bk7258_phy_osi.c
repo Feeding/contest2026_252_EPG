@@ -683,6 +683,18 @@ extern void rtos_enable_int(uint32_t flags);
 extern void delay_us(uint32_t us);
 
 /****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+/* Where the library's per-channel register-set callback is parked.  Kept
+ * because the vendor keeps it, and because a pointer the library handed us
+ * is worth having visible in a memory dump; nothing in this image calls it
+ * (see phy_osi_nv_reg_set_hook).
+ */
+
+static void *g_phy_nv_reg_hook;
+
+/****************************************************************************
  * Private Functions
  ****************************************************************************/
 
@@ -810,6 +822,52 @@ static void *phy_osi_null_reg_api(void)
 static uint8_t phy_osi_wifi_media_mode(void)
 {
   return 0;
+}
+
+/****************************************************************************
+ * Name: phy_osi_nv_reg_set_hook
+ *
+ * Description:
+ *   Store the PHY register-set callback the library offers, and that is
+ *   the whole implementation.  The vendor binds this to
+ *   bk_phy_set_nv_reg_hook(), which lives in libwifi.a and does the same
+ *   thing: it parks the pointer so the Wi-Fi NV parameter code can later
+ *   ask the PHY to re-apply per-channel, per-bandwidth register values.
+ *   No Wi-Fi in this image means no one ever asks, so parking it is not a
+ *   stub -- it is the complete behaviour for this configuration.
+ *
+ *   This entry must not be NULL, and that is not a style preference.  It
+ *   is the whole reason bk_cal_if_init took a UsageFault:
+ *
+ *     nv_init:  ldr r3, [g_phy_funcs_t]
+ *               ldr r3, [r3, #44]      @ 0x2c, this entry
+ *               bx  r3
+ *
+ *   calibration_main calls nv_init as its third statement.  A bx loads bit
+ *   0 of its target into EPSR.T, so a null pointer clears the Thumb bit
+ *   and the core raises INVSTATE instead of executing -- which is why a
+ *   null function pointer surfaces here as UFSR.INVSTATE (CFSR 0x00020000)
+ *   and not as any kind of memory fault, and why "it is INVSTATE, so it is
+ *   not a null pointer" is the wrong inference.  The observed R3 of zero
+ *   is the ldr above.
+ *
+ *   The trap was that the vendor leaves this entry NULL too, under
+ *   #if CONFIG_WIFI_ENABLE ... #else in bk_phy_adapter.c, and this port
+ *   copied that branch correctly.  What does not carry over is the other
+ *   half of the vendor's Wi-Fi-off configuration: with Wi-Fi off the SDK
+ *   links libcom_phy.a, whose nv_init is a bare "bx lr" and never reaches
+ *   this entry.  This board links libbk_phy.a ahead of it -- the Wi-Fi
+ *   build of the same objects -- so the Wi-Fi nv_init is the one that
+ *   wins, calling a hook the Wi-Fi-off table never filled in.  Filling it
+ *   in is the smaller of the two ways to make those halves agree; the
+ *   other is to reorder the archives, which would swap the provider of
+ *   every duplicate symbol in them and is not a change to make blind.
+ *
+ ****************************************************************************/
+
+static void phy_osi_nv_reg_set_hook(void *hook)
+{
+  g_phy_nv_reg_hook = hook;
 }
 
 /****************************************************************************
@@ -1973,7 +2031,11 @@ phy_os_funcs_t g_phy_os_funcs =
   ._bk_misc_get_reset_reason         = phy_osi_get_reset_reason,
 
   /* Wi-Fi rate-sensitivity and EVM test entries: absent, as the vendor
-   * leaves them with CONFIG_WIFI_ENABLE off.
+   * leaves them with CONFIG_WIFI_ENABLE off.  Verified absent-and-safe
+   * rather than assumed: with --gc-sections applied, the only code left in
+   * the image that reaches any of them is nv_init, and it reaches
+   * _nv_phy_reg_set_hook, which is therefore the one entry here that is
+   * filled in.
    */
 
   ._rs_init                          = NULL,
@@ -1981,7 +2043,7 @@ phy_os_funcs_t g_phy_os_funcs =
   ._rs_deinit                        = NULL,
   ._evm_init                         = NULL,
   ._evm_bypass_mac_init              = NULL,
-  ._nv_phy_reg_set_hook              = NULL,
+  ._nv_phy_reg_set_hook              = phy_osi_nv_reg_set_hook,
   ._evm_clear_ke_evt_mac_bit         = NULL,
   ._evm_set_ke_evt_mac_bit           = NULL,
   ._tx_evm_set_chan_ctxt_pop         = NULL,
