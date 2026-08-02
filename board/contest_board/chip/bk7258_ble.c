@@ -24,13 +24,22 @@ extern int  rf_adapter_init(void *funcs);
 extern void calibration_init(void);
 extern void rf_module_vote_ctrl(uint32_t cmd, uint32_t bit);
 
+/* The OSI table (bk7258_bt_osi.c).  Its address is taken, never called:
+ * without a reference the whole object -- and every closed PHY symbol its
+ * table entries point at -- is dropped by --gc-sections, and a build that
+ * discards the code proves nothing about whether it links.
+ */
+
+extern int bk7258_bt_osi_init(void);
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
 uintptr_t bk7258_ble_link_probe(void)
 {
-  return (uintptr_t)bt_os_adapter_init +
+  return (uintptr_t)bk7258_bt_osi_init +
+         (uintptr_t)bt_os_adapter_init +
          (uintptr_t)bluetooth_controller_init +
          (uintptr_t)bk_ble_reg_hci_recv_callback +
          (uintptr_t)bk_ble_hci_cmd_to_controller +

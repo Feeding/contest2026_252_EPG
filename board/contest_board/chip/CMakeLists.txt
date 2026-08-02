@@ -55,7 +55,8 @@ endif()
 set(BK_IDK_LIBS /Users/apple/app/github.com/bk_idk/components/bk_libs/bk7258/libs)
 
 if(EXISTS ${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
-  list(APPEND SRCS bk7258_ble.c bk7258_ble_shim.c bk7258_vnd_cal.c)
+  list(APPEND SRCS bk7258_ble.c bk7258_ble_shim.c bk7258_vnd_cal.c
+                   bk7258_bt_osi.c)
   nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
   nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_host_ble.a)
   nuttx_add_extra_library(${BK_IDK_LIBS}/libbk_phy.a)
