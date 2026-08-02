@@ -40,10 +40,13 @@
  *      wrong absolute level, correct enough to emit packets, which is the
  *      right trade for a first bring-up.
  *
- *   2. No SARADC driver, so temperature and supply sensing are stubs
- *      returning a fixed nominal reading, and _bk_feature_temp_detect_enable
- *      reports the feature off so the temperature-compensation path is not
- *      entered at all.
+ *   2. The SARADC is real, driven by bk7258_saradc.c: the transmit-power
+ *      detector, the on-die temperature sensor and the supply are all
+ *      measured rather than assumed, because the calibration arithmetic
+ *      is built on them.  What is still off is the *periodic* re-trim --
+ *      _bk_feature_temp_detect_enable reports the feature disabled, since
+ *      this port runs no temperature daemon.  Calibration's own one-shot
+ *      temperature read does not go through that flag and does happen.
  *
  *   3. Sleep is never entered on this port, so the low-power vote entries
  *      are no-ops.  Note that RF power arbitration is *not* in that
@@ -83,6 +86,26 @@
 #include "arm_internal.h"
 #include "bk7258_memorymap.h"
 #include "bk7258_wdt.h"
+
+/****************************************************************************
+ * External Function Prototypes
+ ****************************************************************************/
+
+/* The polled SARADC driver in bk7258_saradc.c.  Declared here rather than
+ * in a header because that is how this board reaches its other chip-layer
+ * entry points (see apps/face/face_main.c), and because the converter has
+ * exactly one consumer: the acquisition entries further down.
+ */
+
+uint32_t bk7258_saradc_div(uint32_t adc_clk);
+int bk7258_saradc_pwrup(void);
+int bk7258_saradc_start(uint8_t channel, uint8_t mode, uint32_t div,
+                        uint8_t saturate, uint8_t steady, uint8_t rate,
+                        uint8_t filter);
+int bk7258_saradc_stop(void);
+int bk7258_saradc_read(uint16_t *buf, uint32_t size, uint32_t timeout_ms);
+void bk7258_saradc_tempsensor(bool enable);
+void bk7258_saradc_set_flag(uint8_t flag);
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -168,12 +191,49 @@
 #define PHY_VIOLDOSEL_LIMITED       2
 #define PHY_VIOLDOSEL_DEFAULT       4
 
-/* Sensor stand-ins.  Both are raw SARADC codes, not engineering units --
- * that is what the vendor's own accessors return.
+/* Fallbacks for a sensor read that fails.  Both are raw SARADC codes, not
+ * engineering units -- that is what the vendor's own accessors return.
+ * The supply code is the one the vendor's driver pins to its 1 V
+ * calibration point, so a consumer that ignores the error code sees a
+ * stable nominal supply and never applies a droop correction; the
+ * temperature code is the midpoint of the vendor's own validity window.
  */
 
 #define PHY_TEMP_RAW_NOMINAL        687
 #define PHY_VOLT_RAW_NOMINAL        0x9c7
+
+/* Sensor acquisition, transcribed from the vendor's detectors
+ * (bk_idk components/temp_detect/temp_detect.c and volt_detect.c with
+ * CONFIG_SOC_BK7236XX set and CONFIG_SDMADC_TEMP unset).  Both run the
+ * converter continuously at 203125 Hz with the longest settle, read
+ * PHY_ADC_TEMP_BUFFER_SIZE samples, discard the first PHY_ADC_SENSE_SKIP
+ * and average what is left; the temperature result is then divided by
+ * four.  Channel 7 is the on-die temperature sensor and channel 0 the
+ * supply (bk7258 hal/adc_ll.h channel map).
+ */
+
+#define PHY_ADC_TEMP_CHANNEL        7
+#define PHY_ADC_VOLT_CHANNEL        0
+#define PHY_ADC_SENSE_CLK           203125
+#define PHY_ADC_SENSE_STEADY        7
+#define PHY_ADC_SENSE_SKIP          5
+#define PHY_ADC_SENSE_RETRY         3
+#define PHY_ADC_SENSE_TIMEOUT_MS    100
+#define PHY_ADC_TEMP_SHIFT          2
+
+/* A sample of exactly 2048 is the converter's mid-code and the vendor
+ * treats it, like zero, as "no reading" rather than as data.
+ */
+
+#define PHY_ADC_SAMPLE_INVALID      2048
+
+/* adc_mode_t and adc_saturate_mode_t (bk_idk driver/hal/hal_adc_types.h).
+ * The saturation modes count from "off", so the vendor's mode 3 is 4.
+ */
+
+#define PHY_ADC_MODE_CONTINUOUS     3
+#define PHY_ADC_SAT_MODE_2          3
+#define PHY_ADC_SAT_MODE_3          4
 
 /* SARADC calibration anchors for BK7236XX-class parts, the two codes the
  * vendor's driver pins to 1 V and 2 V (bk_idk driver/saradc/adc_driver.c
@@ -840,26 +900,92 @@ static int phy_osi_wdt_stop(void)
 }
 
 /****************************************************************************
+ * Name: phy_osi_sense
+ *
+ * Description:
+ *   One sensor acquisition, the shape both of the vendor's detectors use:
+ *   run the converter continuously on one analog channel, take a fixed
+ *   batch, drop the leading samples that were taken while the input was
+ *   still settling, and average the rest.  Samples of 0 and of the
+ *   mid-code are dropped as well -- the vendor discards both, its comment
+ *   saying the converter can return 0 in power-save mode.
+ *
+ *   The average is a raw converter code, not an engineering unit; that is
+ *   what the vendor's accessors hand back and what the library expects.
+ *
+ * Returned Value:
+ *   The averaged code, or 0 when the batch produced nothing usable, which
+ *   is how the vendor signals the same thing.
+ *
+ ****************************************************************************/
+
+static uint32_t phy_osi_sense(uint8_t channel, uint8_t saturate)
+{
+  uint16_t raw[PHY_ADC_TEMP_BUFFER_SIZE];
+  uint32_t count = 0;
+  uint32_t sum = 0;
+  uint32_t i;
+  int ret;
+
+  ret = bk7258_saradc_start(channel, PHY_ADC_MODE_CONTINUOUS,
+                            bk7258_saradc_div(PHY_ADC_SENSE_CLK),
+                            saturate, PHY_ADC_SENSE_STEADY, 0, 0);
+  if (ret < 0)
+    {
+      return 0;
+    }
+
+  ret = bk7258_saradc_read(raw, PHY_ADC_TEMP_BUFFER_SIZE,
+                           PHY_ADC_SENSE_TIMEOUT_MS);
+  bk7258_saradc_stop();
+
+  if (ret < 0)
+    {
+      return 0;
+    }
+
+  for (i = PHY_ADC_SENSE_SKIP; i < PHY_ADC_TEMP_BUFFER_SIZE; i++)
+    {
+      if (raw[i] != 0 && raw[i] != PHY_ADC_SAMPLE_INVALID)
+        {
+          sum += raw[i];
+          count++;
+        }
+    }
+
+  return count == 0 ? 0 : sum / count;
+}
+
+/****************************************************************************
  * Name: phy_osi_temp_detect_* / phy_osi_get_voltage / phy_osi_temp_enable
  *
  * Description:
- *   This port has no SARADC driver, so temperature compensation is off.
- *   _bk_feature_temp_detect_enable reports the feature disabled, which is
- *   the same answer the vendor gives with CONFIG_TEMP_DETECT unset and is
- *   what keeps the library out of the compensation path entirely; the
- *   remaining entries mirror the vendor's own disabled-build stubs
- *   (is_init reports true so nothing tries to start a detector, init and
- *   deinit report success).
+ *   Single-shot readings of the on-die temperature sensor and of the
+ *   supply, both through the SARADC driver.  Real measurements: the
+ *   library's calibration solves for transmit trim from these, and feeding
+ *   it constants is how it ends up trimming against a temperature that
+ *   never moves.
  *
- *   The two readings are raw SARADC codes, not engineering units -- that is
- *   what the vendor's accessors return.  The voltage code is the one the
- *   vendor's driver pins to its 1 V calibration point, so any consumer sees
- *   a stable nominal supply and never applies a droop correction.  The
- *   temperature code is the midpoint of the vendor's own validity window
- *   (temp_detect.h ADC_TEMP_VAL_MIN..MAX for this part); the true code-to-
- *   degree anchor is not in the open SDK, so this is a plausible constant
- *   rather than a calibrated one.  It is constant, so nothing can read
- *   drift out of it and ask for a re-trim.
+ *   Each is retried the vendor's three times and range-checked against the
+ *   vendor's own validity window before being accepted.  A read that never
+ *   lands reports failure and leaves the caller's variable at a nominal
+ *   code, so a consumer that ignores the error code still sees a plausible
+ *   number -- but the error code is the useful part, because the
+ *   library's temperature correction is skipped entirely when this fails,
+ *   which is the safe outcome.
+ *
+ *   Temperature is divided by four before the range check, exactly as the
+ *   vendor does for this part; the resulting code is still not degrees.
+ *   The code-to-degree anchor lives in factory calibration data this port
+ *   cannot reach, so the library will compare this reading against its own
+ *   default reference tag rather than against a per-unit one.
+ *
+ *   _bk_feature_temp_detect_enable still reports the feature disabled.
+ *   That flag does not gate the reading above -- calibration calls
+ *   _temp_detect_get_temperature directly -- it gates the vendor's
+ *   periodic re-trim daemon, and this port runs no such daemon.  Claiming
+ *   otherwise would promise drift tracking that does not happen.  The
+ *   remaining entries keep mirroring the vendor's disabled-build stubs.
  *
  ****************************************************************************/
 
@@ -881,12 +1007,36 @@ static int phy_osi_temp_detect_deinit(void)
 
 static int phy_osi_temp_detect_get(uint32_t *temperature)
 {
+  uint32_t value = 0;
+  int retry;
+
   if (temperature == NULL)
     {
       return PHY_FAIL;
     }
 
-  *temperature = PHY_TEMP_RAW_NOMINAL;
+  bk7258_saradc_tempsensor(true);
+
+  for (retry = 0; retry < PHY_ADC_SENSE_RETRY; retry++)
+    {
+      value = phy_osi_sense(PHY_ADC_TEMP_CHANNEL, PHY_ADC_SAT_MODE_2) >>
+              PHY_ADC_TEMP_SHIFT;
+
+      if (value > PHY_ADC_TEMP_VAL_MIN && value < PHY_ADC_TEMP_VAL_MAX)
+        {
+          break;
+        }
+    }
+
+  bk7258_saradc_tempsensor(false);
+
+  if (value <= PHY_ADC_TEMP_VAL_MIN || value >= PHY_ADC_TEMP_VAL_MAX)
+    {
+      *temperature = PHY_TEMP_RAW_NOMINAL;
+      return PHY_FAIL;
+    }
+
+  *temperature = value;
   return PHY_OK;
 }
 
@@ -897,12 +1047,30 @@ static int phy_osi_temp_detect_enabled(void)
 
 static int phy_osi_get_voltage(UINT32 *volt_value)
 {
+  uint32_t value = 0;
+  int retry;
+
   if (volt_value == NULL)
     {
       return PHY_FAIL;
     }
 
-  *volt_value = PHY_VOLT_RAW_NOMINAL;
+  for (retry = 0; retry < PHY_ADC_SENSE_RETRY; retry++)
+    {
+      value = phy_osi_sense(PHY_ADC_VOLT_CHANNEL, PHY_ADC_SAT_MODE_2);
+      if (value > PHY_ADC_TEMP_VAL_MIN)
+        {
+          break;
+        }
+    }
+
+  if (value <= PHY_ADC_TEMP_VAL_MIN)
+    {
+      *volt_value = PHY_VOLT_RAW_NOMINAL;
+      return PHY_FAIL;
+    }
+
+  *volt_value = value;
   return PHY_OK;
 }
 
@@ -938,11 +1106,12 @@ static float phy_osi_saradc_calculate(UINT16 adc_val)
  * Name: phy_osi_pm_*
  *
  * Description:
- *   Clock and power votes.  The SARADC clock gate is a no-op because there
- *   is no SARADC user here, and the CPU-frequency vote is a no-op because
- *   this port runs at a fixed clock and never lowers it -- reporting
- *   success keeps the library's own bookkeeping consistent without
- *   promising a frequency change that will not happen.
+ *   Clock and power votes.  The SARADC gate is real: calibration opens it
+ *   once up front and expects the converter reachable from then on.  The
+ *   CPU-frequency vote is a no-op because this port runs at a fixed clock
+ *   and never lowers it -- reporting success keeps the library's own
+ *   bookkeeping consistent without promising a frequency change that will
+ *   not happen.
  *
  *   The PHY clock and power entries are real: they are on the radio path,
  *   not the sleep path.  The vendor reference-counts these votes in its
@@ -953,7 +1122,7 @@ static float phy_osi_saradc_calculate(UINT16 adc_val)
 
 static int phy_osi_pm_saradc_pwrup(void)
 {
-  return PHY_OK;
+  return bk7258_saradc_pwrup() < 0 ? PHY_FAIL : PHY_OK;
 }
 
 static int phy_osi_pm_phy_pwrup(void)
@@ -1210,36 +1379,48 @@ static void phy_osi_modem_clk_on(void)
  * Name: phy_osi_adc_read_raw / phy_osi_saradc_*
  *
  * Description:
- *   Stubs.  There is no SARADC driver in this port, so the acquisition
- *   entries fail rather than hand back an uninitialised buffer that would
- *   be mistaken for a measurement.  The stop entries report success so a
- *   library that started nothing can still unwind cleanly, which is also
- *   what the vendor does when its own autotest path is compiled out.
+ *   The converter acquisition the transmit calibration runs on.  It opens
+ *   the analog transmit-power detector on channel 8 at 2.6 MHz with the
+ *   longest settle, then repeatedly asks for batches of 32 samples and
+ *   takes a trimmed mean of each -- so a failed read here does not crash
+ *   it, it just yields a detector reading of zero and a transmit trim
+ *   solved against nothing.  That is what these entries used to do.
+ *
+ *   Both channel and clock arrive from the library and are passed through
+ *   rather than assumed, and the mode is the vendor's continuous mode with
+ *   its saturation mode 3, which is what bk_cal_saradc_start() configures.
+ *
+ *   The second pair is the vendor's autotest hook.  It is wired to the
+ *   same driver for completeness, converting its arguments the way
+ *   bk_saradc_start() does, but nothing calls it: _saradc_autotest is 0 in
+ *   the variable table below.  Its source-clock argument is ignored for
+ *   the same reason the vendor's own autotest path ignores it -- that path
+ *   forces the 26 MHz crystal too.
  *
  ****************************************************************************/
 
 static int phy_osi_adc_read_raw(uint16_t *buf, uint32_t size,
                                 uint32_t timeout)
 {
-  UNUSED(buf);
-  UNUSED(size);
-  UNUSED(timeout);
-  return PHY_FAIL;
+  return bk7258_saradc_read(buf, size, timeout) < 0 ? PHY_FAIL : PHY_OK;
 }
 
 static int phy_osi_cal_saradc_start(int32_t adc_channel, int32_t adc_clk,
                                     int32_t steady_time)
 {
-  UNUSED(adc_channel);
-  UNUSED(adc_clk);
-  UNUSED(steady_time);
-  return PHY_FAIL;
+  int ret;
+
+  ret = bk7258_saradc_start((uint8_t)adc_channel, PHY_ADC_MODE_CONTINUOUS,
+                            bk7258_saradc_div((uint32_t)adc_clk),
+                            PHY_ADC_SAT_MODE_3, (uint8_t)steady_time, 0, 0);
+
+  return ret < 0 ? PHY_FAIL : PHY_OK;
 }
 
 static int phy_osi_cal_saradc_stop(int32_t adc_channel)
 {
   UNUSED(adc_channel);
-  return PHY_OK;
+  return bk7258_saradc_stop() < 0 ? PHY_FAIL : PHY_OK;
 }
 
 static int phy_osi_saradc_start(uint8_t adc_channel, uint32_t sample_rate,
@@ -1248,26 +1429,27 @@ static int phy_osi_saradc_start(uint8_t adc_channel, uint32_t sample_rate,
                                 uint32_t saturate_mode,
                                 uint32_t steady_time)
 {
-  UNUSED(adc_channel);
-  UNUSED(sample_rate);
-  UNUSED(div);
+  int ret;
+
   UNUSED(saradc_clk);
-  UNUSED(saradc_mode);
   UNUSED(saradc_xtal);
-  UNUSED(saturate_mode);
-  UNUSED(steady_time);
-  return PHY_OK;
+
+  ret = bk7258_saradc_start(adc_channel, (uint8_t)saradc_mode, div,
+                            (uint8_t)saturate_mode, (uint8_t)steady_time,
+                            (uint8_t)sample_rate, 0);
+
+  return ret < 0 ? PHY_FAIL : PHY_OK;
 }
 
 static int phy_osi_saradc_stop(uint8_t adc_channel)
 {
   UNUSED(adc_channel);
-  return PHY_OK;
+  return bk7258_saradc_stop() < 0 ? PHY_FAIL : PHY_OK;
 }
 
 static void phy_osi_set_saradc_flag(UINT8 flag)
 {
-  UNUSED(flag);
+  bk7258_saradc_set_flag(flag);
 }
 
 /****************************************************************************

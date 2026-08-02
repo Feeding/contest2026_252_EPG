@@ -112,13 +112,20 @@ int bk7258_bt_feature_init(void)
  *   vendor tree, so the overlay passes 0 and the two GPIO numbers go
  *   unused.
  *
- *   This faults today, and it is kept off the default path for that
- *   reason: bk_cal_if_init -> calibration_init -> calibration_main
- *   takes a UsageFault, the signature of arithmetic on measurements
- *   that were never made.  Calibration wants the SARADC -- TSSI power,
- *   die temperature, supply voltage -- and every one of those callbacks
- *   in the PHY table is a stub that reports failure.  An ADC driver is
- *   the prerequisite, not a tweak to this call.
+ *   The SARADC callbacks calibration needs -- TSSI power on channel 8,
+ *   die temperature on 7, supply on 0 -- are now real, driven by
+ *   bk7258_saradc.c, so the trim is solved against measurements rather
+ *   than against stubs that reported failure.  That was a prerequisite,
+ *   but calling it the cause of the UsageFault this path used to take
+ *   does not survive checking: a divide by zero cannot fault here,
+ *   because nothing in this tree sets CCR.DIV_0_TRP and the reset
+ *   default leaves an integer divide by zero returning zero quietly.
+ *   Whether the fault is gone is therefore an open question, and this
+ *   stays off the default path until a board run answers it.  If it
+ *   still faults, read CFSR rather than assuming: the calibration
+ *   writes the TRX block at 0x4980c000 directly, which needs the RF
+ *   domain and modem clock this function's first two table votes are
+ *   supposed to have raised.
  *
  ****************************************************************************/
 
