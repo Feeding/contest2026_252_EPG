@@ -710,7 +710,10 @@ int main(int argc, char *argv[])
       /* Staged BLE bring-up: face BT [stage], default 1.
        *   1  register the OSI table   (pure handshake, no hardware)
        *   2  + feature flags          (pure handshake)
-       *   3  + start the controller   (powers the radio; first step
+       *   3  + PHY and RF tables      (pure handshake; the closed radio
+       *                                library reads these the moment
+       *                                anything votes for the radio)
+       *   4  + start the controller   (powers the radio; first step
        *                                that can genuinely hang)
        *
        * Stage 3 runs on a thread below this one so that a controller
@@ -720,6 +723,8 @@ int main(int argc, char *argv[])
 
       extern int bk7258_bt_osi_init(void);
       extern int bk7258_bt_feature_init(void);
+      extern int bk7258_phy_adapter_init(void);
+      extern int bk7258_rf_adapter_init(void);
       extern int bk7258_bt_controller_init(void);
 
       int stage = (argc > 2) ? atoi(argv[2]) : 1;
@@ -739,6 +744,20 @@ int main(int argc, char *argv[])
       if (ret != 0 || stage < 3)
         {
           return ret == 0 ? 0 : 1;
+        }
+
+      /* PHY first, then RF: the radio arbiter's error path dereferences
+       * the PHY table's logger, so registering it second would fault on
+       * the first bad command instead of reporting it.
+       */
+
+      ret = bk7258_phy_adapter_init();
+      printf("face: phy table -> %d\n", ret);
+      ret = bk7258_rf_adapter_init();
+      printf("face: rf table -> %d\n", ret);
+      if (stage < 4)
+        {
+          return 0;
         }
 
         {
