@@ -275,6 +275,23 @@ int bk7258_ble_adv_start(const char *name)
 
   ret = hci_cmd(0x200a, &enable, 1);
   syslog(LOG_INFO, "hci: adv_enable -> %d\n", ret);
+
+    {
+      /* Sample the interrupt counter only now: before the transmitter
+       * is enabled the link layer has nothing to schedule, so a zero
+       * reading earlier said nothing.  A count that climbs here is the
+       * radio actually running advertising events.
+       */
+
+      extern void bk7258_bt_osi_diag(void);
+
+      bk7258_bt_osi_diag();
+      sleep(2);
+      bk7258_bt_osi_diag();
+      sleep(2);
+      bk7258_bt_osi_diag();
+    }
+
   return ret;
 }
 
