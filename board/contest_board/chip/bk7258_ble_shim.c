@@ -15,6 +15,8 @@
 #include <nuttx/kmalloc.h>
 #include <stdint.h>
 
+#include "arm_internal.h"
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -76,4 +78,20 @@ void bk_uart_recover_rx_isr(void)
 void bk_set_printf_sync(uint8_t enable)
 {
   (void)enable;
+}
+
+/****************************************************************************
+ * Name: sys_drv_module_power_state_get
+ *
+ * Description:
+ *   Report whether a power domain is switched off.  The closed PHY's
+ *   rfconfig switch calls this directly; the module number is the bit
+ *   index in the sleep/wakeup word, and the bit reads 1 when the domain
+ *   is powered down, matching the vendor's HAL.
+ *
+ ****************************************************************************/
+
+int sys_drv_module_power_state_get(uint32_t module)
+{
+  return (int)((getreg32(0x44010040ul) >> module) & 1u);
 }

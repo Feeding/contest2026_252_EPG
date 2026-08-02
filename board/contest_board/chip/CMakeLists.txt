@@ -59,7 +59,14 @@ if(EXISTS ${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
                    bk7258_bt_osi.c bk7258_phy_osi.c bk7258_saradc.c)
   nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
   nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_host_ble.a)
-  nuttx_add_extra_library(${BK_IDK_LIBS}/libbk_phy.a)
+  # The BT-only PHY, which is what the vendor's BLE-only projects link
+  # (their configs carry no CONFIG_WIFI_ENABLE).  Both archives export
+  # the same 401 symbols, so this is a swap of implementations, not of
+  # interfaces -- and the two implementations differ exactly where this
+  # port has been getting hurt: libbk_phy's nv_init branches through a
+  # table slot the no-Wi-Fi configuration leaves NULL, and it brings up
+  # an RF config that points the transmitter at a Wi-Fi PLL a BLE-only
+  # build never starts.  libcom_phy's nv_init is a single bx lr.
   nuttx_add_extra_library(${BK_IDK_LIBS}/libcom_phy.a)
 endif()
 

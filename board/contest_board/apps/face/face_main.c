@@ -758,6 +758,16 @@ int main(int argc, char *argv[])
       printf("face: phy table -> %d\n", ret);
       ret = bk7258_rf_adapter_init();
       printf("face: rf table -> %d\n", ret);
+
+        {
+          /* Hand the synthesiser to bluetooth before the controller
+           * brings the transceiver up: it reads the RF config there.
+           */
+
+          extern int bk7258_ble_use_bt_pll(void);
+
+          printf("face: bt pll -> %d\n", bk7258_ble_use_bt_pll());
+        }
       if (stage < 4)
         {
           return 0;
