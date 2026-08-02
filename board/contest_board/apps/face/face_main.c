@@ -373,6 +373,216 @@ int main(int argc, char *argv[])
       return 0;
     }
 
+  if (argc > 1 && strcmp(argv[1], "MIC") == 0)
+    {
+      /* Live talkback: hardware ADC->DAC loop, zero CPU in the path.
+       * face MIC [sec] (default 10).  Howling near the speaker is a
+       * healthy sign.
+       */
+
+      extern int bk7258_audio_adc_init(bool rate16k);
+      extern int bk7258_audio_adc_start(void);
+      extern int bk7258_audio_adc_stop(void);
+      extern int bk7258_audio_dac_init(bool rate16k);
+      extern int bk7258_audio_dac_start(void);
+      extern int bk7258_audio_dac_stop(void);
+      extern int bk7258_audio_loopback(bool on);
+      int sec = (argc > 2) ? atoi(argv[2]) : 10;
+
+      if (sec < 3)
+        {
+          sec = 3;
+        }
+      else if (sec > 30)
+        {
+          sec = 30;
+        }
+
+      if (bk7258_audio_adc_init(true) != 0 ||
+          bk7258_audio_dac_init(true) != 0)
+        {
+          printf("face: audio init failed\n");
+          return 1;
+        }
+
+      bk7258_audio_adc_start();
+      bk7258_audio_dac_start();
+      bk7258_audio_loopback(true);
+      printf("face: live mic for %d s -- talk!\n", sec);
+      sleep(sec);
+      bk7258_audio_loopback(false);
+      bk7258_audio_dac_stop();
+      bk7258_audio_adc_stop();
+      printf("face: mic done\n");
+      return 0;
+    }
+
+  if (argc > 1 && strcmp(argv[1], "REC") == 0)
+    {
+      /* Closed-loop mic test: face REC [sec].  The motor buzz is the
+       * "start talking" cue, then sec seconds of MIC1 go to a WAV on
+       * the card and straight back out the speaker.
+       */
+
+      extern int bk7258_audio_adc_init(bool rate16k);
+      extern int bk7258_audio_adc_start(void);
+      extern int bk7258_audio_adc_stop(void);
+      extern int bk7258_audio_adc_read(int16_t *pcm, int nsamples);
+      extern int bk7258_audio_adc_read2(uint32_t *pairs, int nsamples);
+      extern int bk7258_audio_dac_init(bool rate16k);
+      extern int bk7258_audio_dac_start(void);
+      extern int bk7258_audio_dac_stop(void);
+      extern int bk7258_audio_dac_write(const int16_t *pcm, int nsamples);
+      extern int bk7258_motor_init(void);
+      extern int bk7258_motor_on(int duty_pct);
+      extern int bk7258_motor_off(void);
+
+      int sec = (argc > 2) ? atoi(argv[2]) : 5;
+      int total;
+      int peakl = 0;
+      int peakr = 0;
+      uint32_t *pairs;
+      int16_t *pcm;
+      int16_t junk[160];
+      int fd;
+      int i;
+      int ret;
+
+      if (sec < 1)
+        {
+          sec = 1;
+        }
+      else if (sec > 10)
+        {
+          sec = 10;
+        }
+
+      total = sec * 16000;
+      pairs = malloc(total * 4);
+      pcm = malloc(total * 2);
+      if (pcm == NULL || pairs == NULL)
+        {
+          free(pairs);
+          free(pcm);
+          return 1;
+        }
+
+      ret = bk7258_audio_adc_init(true);
+      if (ret != 0)
+        {
+          printf("face: adc init failed: %d\n", ret);
+          free(pcm);
+          return 1;
+        }
+
+      bk7258_motor_init();
+      bk7258_motor_on(30);
+      usleep(150 * 1000);
+      bk7258_motor_off();
+      usleep(800 * 1000);              /* breathe, then record */
+
+      printf("face: recording %d s...\n", sec);
+      bk7258_audio_adc_start();
+
+      for (i = 0; i < 10; i++)                /* 100 ms settle, discard */
+        {
+          bk7258_audio_adc_read(junk, 160);
+        }
+
+      bk7258_audio_adc_read2(pairs, total);
+      bk7258_audio_adc_stop();
+
+      for (i = 0; i < total; i++)
+        {
+          int l = (int16_t)(pairs[i] & 0xffff);
+          int r = (int16_t)(pairs[i] >> 16);
+
+          if (l < 0) l = -l;
+          if (r < 0) r = -r;
+          if (l > peakl) peakl = l;
+          if (r > peakr) peakr = r;
+        }
+
+      printf("face: peaks MIC1 %d MIC2 %d -> using %s\n",
+             peakl, peakr, peakr > peakl ? "MIC2" : "MIC1");
+
+        {
+          /* Forensics: raw pairs, DC statistics, and the analog regs
+           * as the hardware actually holds them.
+           */
+
+          int64_t sum = 0;
+          int mn = 32767;
+          int mx = -32768;
+
+          printf("face: raw:");
+          for (i = 0; i < 16; i++)
+            {
+              printf(" %08lx", (unsigned long)pairs[i * 100]);
+            }
+
+          printf("\n");
+          for (i = 0; i < total; i++)
+            {
+              int v = (int16_t)(pairs[i] & 0xffff);
+
+              sum += v;
+              if (v < mn) mn = v;
+              if (v > mx) mx = v;
+            }
+
+          extern void bk7258_audio_ana_dump(void);
+
+          printf("face: mic1 dc %ld min %d max %d\n",
+                 (long)(sum / total), mn, mx);
+          bk7258_audio_ana_dump();
+        }
+
+      for (i = 0; i < total; i++)
+        {
+          pcm[i] = (peakr > peakl)
+                   ? (int16_t)(pairs[i] >> 16)
+                   : (int16_t)(pairs[i] & 0xffff);
+        }
+
+      free(pairs);
+      pairs = NULL;
+
+      fd = open("/mnt/REC.WAV", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+      if (fd >= 0)
+        {
+          uint8_t wav[44] =
+          {
+            'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E',
+            'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 1, 0,
+            0x80, 0x3e, 0, 0, 0, 0x7d, 0, 0, 2, 0, 16, 0,
+            'd', 'a', 't', 'a', 0, 0, 0, 0
+          };
+          uint32_t dl = total * 2;
+          uint32_t rl = dl + 36;
+
+          memcpy(wav + 4, &rl, 4);
+          memcpy(wav + 40, &dl, 4);
+          write(fd, wav, 44);
+          write(fd, pcm, dl);
+          close(fd);
+          printf("face: saved /mnt/REC.WAV\n");
+        }
+
+      printf("face: playback...\n");
+      ret = bk7258_audio_dac_init(true);
+      if (ret == 0)
+        {
+          bk7258_audio_dac_start();
+          bk7258_audio_dac_write(pcm, total);
+          bk7258_audio_dac_stop();
+        }
+
+      free(pcm);
+      printf("face: rec done\n");
+      return 0;
+    }
+
   if (argc > 2 && strcmp(argv[1], "PLAY") == 0)
     {
       /* WAV playback through the on-chip DAC: face PLAY <name-on-card>.
