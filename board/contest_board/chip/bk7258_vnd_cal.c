@@ -45,6 +45,7 @@ typedef struct tmp_pwr_st
 #define TMP_PWR_TAB_LEN         39
 #define TPC_PAMAP_TAB_B_LEN     (48)
 #define TPC_PAMAP_TAB_G_LEN     (80)
+#define TPC_PAMAP_TAB_BT_LEN    (65)
 
 const UINT32 g_default_xtal   = 0x3a;
 
@@ -208,6 +209,79 @@ const PWR_REGS cfg_tab_g[TPC_PAMAP_TAB_G_LEN] = {
 };
 
 const UINT32 pwr_gain_base_gain_ble = 0x18a94c00;
+
+/* ble_cal_set_txpwr() indexes this one even in a BLE-only build, so it has
+ * to be present whether or not classic BT is ever brought up.
+ */
+
+const PWR_REGS cfg_tab_bt[TPC_PAMAP_TAB_BT_LEN] = {
+	// pregain
+	PWRI(0xB),   // 0
+	PWRI(0xB),   // 1
+	PWRI(0xB),   // 2
+	PWRI(0xC),   // 3
+	PWRI(0xC),   // 4
+	PWRI(0xD),   // 5
+	PWRI(0xD),   // 6
+	PWRI(0xE),   // 7
+	PWRI(0xE),   // 8
+	PWRI(0xE),   // 9
+	PWRI(0xF),   // 10
+	PWRI(0xF),   // 11
+	PWRI(0x10),  // 12
+	PWRI(0x10),  // 13
+	PWRI(0x11),  // 14
+	PWRI(0x12),  // 15
+	PWRI(0x13),  // 16
+	PWRI(0x14),  // 17
+	PWRI(0x15),  // 18
+	PWRI(0x16),  // 19
+	PWRI(0x17),  // 20
+	PWRI(0x18),  // 21
+	PWRI(0x18),  // 22
+	PWRI(0x19),  // 23
+	PWRI(0x1A),  // 24
+	PWRI(0x1B),  // 25
+	PWRI(0x1C),  // 26
+	PWRI(0x1D),  // 27
+	PWRI(0x1E),  // 28
+	PWRI(0x1F),  // 29
+	PWRI(0x20),  // 30
+	PWRI(0x22),  // 31
+	PWRI(0x23),  // 32
+	PWRI(0x26),  // 33
+	PWRI(0x29),  // 34
+	PWRI(0x2C),  // 35
+	PWRI(0x2D),  // 36
+	PWRI(0x30),  // 37
+	PWRI(0x32),  // 38
+	PWRI(0x34),  // 39
+	PWRI(0x36),  // 40
+	PWRI(0x37),  // 41
+	PWRI(0x38),  // 42
+	PWRI(0x39),  // 43
+	PWRI(0x3A),  // 44
+	PWRI(0x3B),  // 45
+	PWRI(0x3D),  // 46
+	PWRI(0x3F),  // 47
+	PWRI(0x40),  // 48
+	PWRI(0x4F),  // 49
+	PWRI(0x51),  // 50
+	PWRI(0x54),  // 51
+	PWRI(0x56),  // 52
+	PWRI(0x59),  // 53
+	PWRI(0x5B),  // 54
+	PWRI(0x5E),  // 55
+	PWRI(0x61),  // 56
+	PWRI(0x63),  // 57
+	PWRI(0x66),  // 58
+	PWRI(0x69),  // 59
+	PWRI(0x6C),  // 60
+	PWRI(0x70),  // 61
+	PWRI(0x73),  // 62
+	PWRI(0x76),  // 63
+	PWRI(0x7A),  // 64
+};
 
 const TXPWR_ST gtxpwr_tab_def_b[WLAN_2_4_G_CHANNEL_NUM] = {
     INIT_TXPWR_VALUE(21, TXPWR_ELEM_INUSED),  // ch1  inused
