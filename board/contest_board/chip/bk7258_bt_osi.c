@@ -1104,12 +1104,16 @@ static int bt_osi_coex_init(void)
  *
  ****************************************************************************/
 
+volatile uint32_t g_bt_isr_hits;
+
 static int bt_osi_isr_handler(int irq, void *context, void *arg)
 {
   void (*isr)(void) = (void (*)(void))arg;
 
   UNUSED(irq);
   UNUSED(context);
+
+  g_bt_isr_hits++;
 
   if (isr != NULL)
     {
@@ -2062,6 +2066,25 @@ struct bt_osi_funcs_t g_bt_osi_funcs =
  *   it rejected the table (version or size mismatch).
  *
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_bt_osi_diag
+ *
+ * Description:
+ *   Report whether the radio's interrupts actually reach the CPU: the
+ *   hit count, the SoC routing matrix word that gates lines 32..63
+ *   ahead of the NVIC, and the NVIC enable word covering the same
+ *   lines.  Bits 7/8/9 of the routing word are DM/BLE/BT.
+ *
+ ****************************************************************************/
+
+void bk7258_bt_osi_diag(void)
+{
+  syslog(LOG_INFO, "bt: isr hits %lu route32_63 %08lx nvic_ise1 %08lx\n",
+         (unsigned long)g_bt_isr_hits,
+         (unsigned long)getreg32(0x44010084ul),
+         (unsigned long)getreg32(0xe000e104ul));
+}
 
 int bk7258_bt_osi_init(void)
 {
