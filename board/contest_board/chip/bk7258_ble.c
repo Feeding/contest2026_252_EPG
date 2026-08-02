@@ -22,7 +22,7 @@ extern int  bk_ble_hci_cmd_to_controller(uint8_t *buf, uint16_t len);
 extern int  bk_ble_create_advertising(void);
 extern int  bt_feature_adapter_init(void *arg);
 extern int  phy_adapter_init(void *funcs, void *vars);
-extern int  rf_adapter_init(void *funcs);
+extern void rf_adapter_init(const void *funcs, const void *vars);
 extern void calibration_init(void);
 extern void rf_module_vote_ctrl(uint32_t cmd, uint32_t bit);
 
@@ -33,6 +33,14 @@ extern void rf_module_vote_ctrl(uint32_t cmd, uint32_t bit);
  */
 
 extern int bk7258_bt_osi_init(void);
+
+/* The PHY/RF adapter tables (bk7258_phy_osi.c), for the same reason:
+ * unreferenced, --gc-sections drops the object along with every closed
+ * PHY symbol its tables relocate against.
+ */
+
+extern int bk7258_phy_adapter_init(void);
+extern int bk7258_rf_adapter_init(void);
 
 /* Feature flags the controller reads once at init.  Layout must match
  * bt_feature_config.h byte for byte; all zero is the stock BLE profile,
@@ -92,6 +100,8 @@ int bk7258_bt_controller_init(void)
 uintptr_t bk7258_ble_link_probe(void)
 {
   return (uintptr_t)bk7258_bt_osi_init +
+         (uintptr_t)bk7258_phy_adapter_init +
+         (uintptr_t)bk7258_rf_adapter_init +
          (uintptr_t)bk7258_bt_feature_init +
          (uintptr_t)bk7258_bt_controller_init +
          (uintptr_t)bt_os_adapter_init +
