@@ -687,6 +687,22 @@ int main(int argc, char *argv[])
       return 0;
     }
 
+  if (argc > 1 && strcmp(argv[1], "BT") == 0)
+    {
+      /* First execution of closed BLE code, deliberately the smallest
+       * step that exists: registering the OSI table is a version and
+       * size handshake inside the library that touches no hardware, so
+       * a mismatch comes back as an error code instead of a hang.
+       */
+
+      extern int bk7258_bt_osi_init(void);
+      int ret = bk7258_bt_osi_init();
+
+      printf("face: bt_os_adapter_init -> %d (%s)\n", ret,
+             ret == 0 ? "table accepted" : "REJECTED");
+      return ret == 0 ? 0 : 1;
+    }
+
   if (argc > 1 && strcmp(argv[1], "VIBE") == 0)
     {
       /* Vibration motor test: face VIBE [ms] [duty%].  Defaults to the
