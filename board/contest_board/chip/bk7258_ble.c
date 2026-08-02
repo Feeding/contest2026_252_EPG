@@ -354,6 +354,24 @@ static int ble_hci_acl_cb(uint8_t *buf, uint16_t len)
   return 0;
 }
 
+static int hci_register_once(void)
+{
+  static int s_registered;
+
+  if (s_registered)
+    {
+      return 0;
+    }
+
+  if (bk_ble_reg_hci_recv_callback(ble_hci_evt_cb, ble_hci_acl_cb) != 0)
+    {
+      return -1;
+    }
+
+  s_registered = 1;
+  return 0;
+}
+
 static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
 {
   uint8_t buf[64];
@@ -441,6 +459,66 @@ int bk7258_ble_txpwr(int idx)
  *
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: bk7258_ble_adv_stop
+ *
+ * Description:
+ *   Turn the transmitter off.  Exists to settle one question the earlier
+ *   "advertising kills the scan" measurement could not: a controller with
+ *   a single activity slot would show the same thing while working
+ *   perfectly.  If reception comes back after this, advertising was
+ *   simply holding the radio; if it stays dead, the radio is wedged.
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_ble_tx_test / bk7258_ble_hci_reset
+ *
+ * Description:
+ *   Direct Test Mode transmit is the shortest path to keying the
+ *   transmitter -- one command, no advertising state machine, no PDU
+ *   construction -- so if it wedges the radio the same way advertising
+ *   does, the fault is in the transmit chain itself rather than
+ *   anywhere above it.  The reset is here to find out whether the wedge
+ *   is soft state the controller can be talked out of.
+ *
+ ****************************************************************************/
+
+int bk7258_ble_tx_test(int channel, int seconds)
+{
+  uint8_t p[3];
+  int ret;
+
+  p[0] = (uint8_t)channel;   /* 0..39, (F - 2402) / 2 */
+  p[1] = 37;                 /* payload length */
+  p[2] = 0;                  /* PRBS9 */
+
+  ret = hci_cmd(0x201e, p, 3);
+  syslog(LOG_INFO, "ble: tx_test start ch%d -> %d\n", channel, ret);
+  if (ret != 0)
+    {
+      return ret;
+    }
+
+  sleep(seconds);
+
+  ret = hci_cmd(0x201f, NULL, 0);
+  syslog(LOG_INFO, "ble: tx_test stop -> %d\n", ret);
+  return ret;
+}
+
+int bk7258_ble_hci_reset(void)
+{
+  return hci_cmd(0x0c03, NULL, 0);
+}
+
+int bk7258_ble_adv_stop(void)
+{
+  uint8_t off = 0;
+
+  return hci_cmd(0x200a, &off, 1);
+}
+
 int bk7258_ble_scan(int seconds)
 {
   static const uint8_t scan_params[7] =
@@ -456,7 +534,13 @@ int bk7258_ble_scan(int seconds)
   int ret;
   int i;
 
-  ret = bk_ble_reg_hci_recv_callback(ble_hci_evt_cb, ble_hci_acl_cb);
+  /* Register once per boot.  Handing the controller a fresh callback
+   * pair on every scan left the second scan hearing nothing at all --
+   * an artefact that masqueraded as the radio being wedged by whatever
+   * ran in between.
+   */
+
+  ret = hci_register_once();
   if (ret != 0)
     {
       return -1;
@@ -532,7 +616,7 @@ int bk7258_ble_adv_start(const char *name)
   memcpy(adv_data + 6, name, nlen);
   adv_data[0] = (uint8_t)(5 + nlen);  /* significant part length */
 
-  ret = bk_ble_reg_hci_recv_callback(ble_hci_evt_cb, ble_hci_acl_cb);
+  ret = hci_register_once();
   syslog(LOG_INFO, "hci: reg callback -> %d\n", ret);
   if (ret != 0)
     {
@@ -615,6 +699,9 @@ uintptr_t bk7258_ble_link_probe(void)
          (uintptr_t)bk7258_bt_controller_init +
          (uintptr_t)bk7258_ble_adv_start +
          (uintptr_t)bk7258_ble_scan +
+         (uintptr_t)bk7258_ble_adv_stop +
+         (uintptr_t)bk7258_ble_tx_test +
+         (uintptr_t)bk7258_ble_hci_reset +
          (uintptr_t)bk7258_bt_cal_init +
          (uintptr_t)bk7258_ble_use_bt_pll +
          (uintptr_t)bk7258_ble_txpwr +

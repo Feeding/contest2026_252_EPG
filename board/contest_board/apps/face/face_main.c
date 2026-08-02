@@ -730,8 +730,24 @@ int main(int argc, char *argv[])
       extern int bk7258_rf_adapter_init(void);
       extern int bk7258_bt_controller_init(void);
 
+      /* Initialise once per boot.  Re-running the staging over a live
+       * stack -- re-registering the OSI table, re-initialising the PHY
+       * and RF adapters, re-running calibration -- breaks the radio,
+       * and that artefact is what made a second scan always return
+       * zero.  Two conclusions drawn from that pattern (advertising
+       * wedges the radio; a refused transmit wedges it too) were the
+       * harness talking, not the hardware.
+       */
+
+      static int s_bt_ready;
+
       int stage = (argc > 2) ? atoi(argv[2]) : 1;
       int ret;
+
+      if (s_bt_ready)
+        {
+          goto bt_staged;
+        }
 
       ret = bk7258_bt_osi_init();
       printf("face: bt osi -> %d (%s)\n", ret,
@@ -806,9 +822,36 @@ int main(int argc, char *argv[])
 
           printf("face: bt controller -> %d (%s)\n", g_bt_ctrl_ret,
                  g_bt_ctrl_ret == 0 ? "UP" : "failed");
+          s_bt_ready = (g_bt_ctrl_ret == 0);
+
+bt_staged:
           if (g_bt_ctrl_ret != 0 || stage < 5)
             {
               return g_bt_ctrl_ret == 0 ? 0 : 1;
+            }
+
+          if (stage >= 14)
+            {
+              extern int bk7258_ble_tx_test(int channel, int seconds);
+
+              printf("face: tx test -> %d\n", bk7258_ble_tx_test(19, 3));
+              return 0;
+            }
+
+          if (stage >= 13)
+            {
+              extern int bk7258_ble_hci_reset(void);
+
+              printf("face: hci reset -> %d\n", bk7258_ble_hci_reset());
+              return 0;
+            }
+
+          if (stage >= 12)
+            {
+              extern int bk7258_ble_adv_stop(void);
+
+              printf("face: adv stop -> %d\n", bk7258_ble_adv_stop());
+              return 0;
             }
 
           if (stage >= 7)
