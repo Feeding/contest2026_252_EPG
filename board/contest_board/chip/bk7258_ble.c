@@ -96,6 +96,70 @@ int bk7258_bt_feature_init(void)
  *
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: bk7258_bt_cal_init
+ *
+ * Description:
+ *   The radio calibration step, which this port had been skipping.
+ *   The vendor runs it between the adapter tables and the controller
+ *   (bk_init.c: vnd_cal_overlay then bk_cal_if_init on the BT-only
+ *   path), and the controller's own log said so all along --
+ *   cali_ready_status 0x0.  An untrimmed analogue front end explains a
+ *   link layer that schedules events perfectly and neither transmits
+ *   nor hears anything.
+ *
+ *   No external PA on this board: EPA_ENABLE_FLAG is undefined in the
+ *   vendor tree, so the overlay passes 0 and the two GPIO numbers go
+ *   unused.
+ *
+ *   This faults today, and it is kept off the default path for that
+ *   reason: bk_cal_if_init -> calibration_init -> calibration_main
+ *   takes a UsageFault, the signature of arithmetic on measurements
+ *   that were never made.  Calibration wants the SARADC -- TSSI power,
+ *   die temperature, supply voltage -- and every one of those callbacks
+ *   in the PHY table is a stub that reports failure.  An ADC driver is
+ *   the prerequisite, not a tweak to this call.
+ *
+ ****************************************************************************/
+
+struct auto_pwr_cali_s
+{
+  uint32_t cali_mode;
+  int32_t  gtx_tssi_thred_chan1_b;
+  int32_t  gtx_tssi_thred_chan7_b;
+  int32_t  gtx_tssi_thred_chan13_b;
+  int32_t  gtx_tssi_thred_chan1_g;
+  int32_t  gtx_tssi_thred_chan7_g;
+  int32_t  gtx_tssi_thred_chan13_g;
+};
+
+extern void vnd_cal_set_auto_pwr_thred(struct auto_pwr_cali_s ctx);
+extern void vnd_cal_set_epa_config(uint8_t epa_flag, uint16_t rx_gpio,
+                                   uint16_t tx_gpio, uint32_t gainbase_b,
+                                   uint32_t gainbase_g);
+extern void vnd_cal_set_cca_level(uint8_t offset);
+extern int  bk_cal_if_init(void);
+
+extern const uint32_t pwr_gain_base_gain_b;
+extern const uint32_t pwr_gain_base_gain_g;
+
+int bk7258_bt_cal_init(void)
+{
+  static const struct auto_pwr_cali_s auto_pwr =
+  {
+    0x1,                    /* manual calibration mode */
+    0x253, 0x253, 0x257,    /* TSSI thresholds, 802.11b channels */
+    0x23f, 0x22b, 0x22b     /* 802.11g channels */
+  };
+
+  vnd_cal_set_auto_pwr_thred(auto_pwr);
+  vnd_cal_set_epa_config(0, 28, 26, pwr_gain_base_gain_b,
+                         pwr_gain_base_gain_g);
+  vnd_cal_set_cca_level(0);
+
+  return bk_cal_if_init();
+}
+
 int bk7258_bt_controller_init(void)
 {
   return bluetooth_controller_init();
@@ -113,8 +177,28 @@ int bk7258_bt_controller_init(void)
 static volatile int g_hci_evt;
 static uint8_t g_hci_status;
 
+static volatile int g_adv_reports;
+
 static int ble_hci_evt_cb(uint8_t *buf, uint16_t len)
 {
+  /* LE Advertising Report: proof that the receiver hears the world.
+   * Meta event 0x3e, subevent 0x02, then one report per entry:
+   * event type, address type, six address bytes, data length, data,
+   * and RSSI as the last byte.
+   */
+
+  if (len >= 12 && buf[0] == 0x3e && buf[2] == 0x02)
+    {
+      uint8_t dlen = buf[11];
+      int8_t rssi = (len >= 13 + dlen) ? (int8_t)buf[12 + dlen] : 0;
+
+      g_adv_reports++;
+      syslog(LOG_INFO,
+             "ble: heard %02x:%02x:%02x:%02x:%02x:%02x rssi %d\n",
+             buf[10], buf[9], buf[8], buf[7], buf[6], buf[5], rssi);
+      return 0;
+    }
+
   /* Whether the transport hands up a bare event or keeps the H4 type
    * byte in front is not documented either way, so accept both and
    * show the raw bytes: if this never prints, the events are not
@@ -194,6 +278,66 @@ static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
     }
 
   return g_hci_status;
+}
+
+/****************************************************************************
+ * Name: bk7258_ble_scan
+ *
+ * Description:
+ *   Listen for other people's advertisements for a few seconds.  This
+ *   is the one proof of a working radio that needs nothing but the
+ *   board: any phone, headset or fitness band nearby is transmitting,
+ *   and hearing them exercises the same transceiver, antenna and
+ *   calibration the transmitter uses.
+ *
+ ****************************************************************************/
+
+int bk7258_ble_scan(int seconds)
+{
+  static const uint8_t scan_params[7] =
+  {
+    0x00,                   /* passive: listen, never ask for more */
+    0x10, 0x00,             /* interval 16 * 0.625 ms = 10 ms */
+    0x10, 0x00,             /* window: listen the whole interval */
+    0x00,                   /* own address: public */
+    0x00                    /* accept every advertiser */
+  };
+
+  uint8_t enable[2] = { 0x01, 0x00 };
+  int ret;
+  int i;
+
+  ret = bk_ble_reg_hci_recv_callback(ble_hci_evt_cb, ble_hci_acl_cb);
+  if (ret != 0)
+    {
+      return -1;
+    }
+
+  g_adv_reports = 0;
+
+  ret = hci_cmd(0x200b, scan_params, sizeof(scan_params));
+  syslog(LOG_INFO, "ble: scan params -> %d\n", ret);
+  if (ret != 0)
+    {
+      return ret;
+    }
+
+  ret = hci_cmd(0x200c, enable, 2);
+  syslog(LOG_INFO, "ble: scan enable -> %d\n", ret);
+  if (ret != 0)
+    {
+      return ret;
+    }
+
+  for (i = 0; i < seconds; i++)
+    {
+      sleep(1);
+      syslog(LOG_INFO, "ble: %d s, %d reports\n", i + 1, g_adv_reports);
+    }
+
+  enable[0] = 0x00;
+  hci_cmd(0x200c, enable, 2);
+  return g_adv_reports;
 }
 
 /****************************************************************************
@@ -303,6 +447,8 @@ uintptr_t bk7258_ble_link_probe(void)
          (uintptr_t)bk7258_bt_feature_init +
          (uintptr_t)bk7258_bt_controller_init +
          (uintptr_t)bk7258_ble_adv_start +
+         (uintptr_t)bk7258_ble_scan +
+         (uintptr_t)bk7258_bt_cal_init +
          (uintptr_t)bt_os_adapter_init +
          (uintptr_t)bluetooth_controller_init +
          (uintptr_t)bk_ble_reg_hci_recv_callback +
