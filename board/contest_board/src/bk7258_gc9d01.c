@@ -352,37 +352,6 @@ static int gc9d01_putarea(struct lcd_dev_s *dev, fb_coord_t row_start,
 }
 
 /****************************************************************************
- * Name: bk7258_gc9d01_blast_start / _wait
- *
- * Description:
- *   Full-frame hardware path for the face player: set the full window,
- *   issue RAMWR, then hand the wire to the QSPI mapping engine + GDMA.
- *   devno 0 = viewer-right (QSPI1), devno 1 = viewer-left (QSPI0).
- *
- ****************************************************************************/
-
-int bk7258_gc9d01_blast_start(int devno, const void *rgb565)
-{
-  struct gc9d01_dev_s *priv = &g_gc9d01[devno & 1];
-  extern void bk7258_qspi_blast_start(int port, const void *buf,
-                                      size_t len);
-
-  gc9d01_setwindow(priv, 0, 0, GC9D01_XRES - 1, GC9D01_YRES - 1);
-  bk7258_gpio_write(priv->dc_pin, true);
-
-  bk7258_qspi_blast_start((devno & 1) ? 0 : 1, rgb565,
-                          GC9D01_XRES * GC9D01_YRES * 2);
-  return 0;
-}
-
-int bk7258_gc9d01_blast_wait(int devno)
-{
-  extern int bk7258_qspi_blast_wait(int port);
-
-  return bk7258_qspi_blast_wait((devno & 1) ? 0 : 1);
-}
-
-/****************************************************************************
  * Name: bk7258_gc9d01_blast_pair
  *
  * Description:
