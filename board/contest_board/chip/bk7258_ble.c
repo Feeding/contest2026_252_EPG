@@ -179,7 +179,33 @@ int bk7258_bt_cal_init(void)
 
 int bk7258_bt_controller_init(void)
 {
-  return bluetooth_controller_init();
+  /* Calibration goes after the controller here, not before it as the
+   * vendor sequences it, and the radio is measurably dead the other
+   * way round: calibrate first and a scan hears nothing, calibrate
+   * second and it hears the whole room.  The controller is what
+   * actually powers the transceiver on this port -- BTSP domain, BTDM
+   * and XVR clocks, all through the OSI table -- while calibration
+   * raises the radio through two PHY-table slots whose implementations
+   * here are not doing that job.  Run first, it trims a block that is
+   * not switched on.  Fixing those two slots would restore the vendor
+   * order; until then this order is the one that works.
+   *
+   * The -1 is expected and not fatal: no factory calibration record in
+   * flash, so the closed library falls back to the board default power
+   * tables and still trims the crystal.
+   */
+
+  int ret = bluetooth_controller_init();
+
+  if (ret == 0)
+    {
+      int cal = bk7258_bt_cal_init();
+
+      syslog(LOG_INFO, "ble: calibration -> %d%s\n", cal,
+             cal == 0 ? "" : " (no factory record; defaults in use)");
+    }
+
+  return ret;
 }
 
 /****************************************************************************
