@@ -2080,10 +2080,13 @@ struct bt_osi_funcs_t g_bt_osi_funcs =
 
 void bk7258_bt_osi_diag(void)
 {
-  syslog(LOG_INFO, "bt: isr hits %lu route32_63 %08lx nvic_ise1 %08lx\n",
+  syslog(LOG_INFO,
+         "bt: isr %lu route %08lx pwr %08lx clk %08lx lpo %08lx\n",
          (unsigned long)g_bt_isr_hits,
          (unsigned long)getreg32(0x44010084ul),
-         (unsigned long)getreg32(0xe000e104ul));
+         (unsigned long)getreg32(0x44010040ul),
+         (unsigned long)getreg32(0x44010030ul),
+         (unsigned long)getreg32(0x44000104ul));
 }
 
 int bk7258_bt_osi_init(void)
