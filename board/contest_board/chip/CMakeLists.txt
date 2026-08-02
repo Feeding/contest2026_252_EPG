@@ -32,6 +32,10 @@ if(CONFIG_I2C_BITBANG)
   list(APPEND SRCS bk7258_camera.c)
 endif()
 
+if(CONFIG_CONTEST_FACE)
+  list(APPEND SRCS bk7258_jpegdec.c bk7258_dma2d.c)
+endif()
+
 if(CONFIG_BK7258_I2C1)
   list(APPEND SRCS bk7258_i2c.c)
 endif()
