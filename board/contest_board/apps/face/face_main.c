@@ -715,6 +715,7 @@ int main(int argc, char *argv[])
        *                                anything votes for the radio)
        *   4  + start the controller   (powers the radio; first step
        *                                that can genuinely hang)
+       *   5  + advertise over raw HCI (on the air, phone-visible)
        *
        * Stage 3 runs on a thread below this one so that a controller
        * that never returns leaves the console alive to say so, instead
@@ -793,7 +794,19 @@ int main(int argc, char *argv[])
 
           printf("face: bt controller -> %d (%s)\n", g_bt_ctrl_ret,
                  g_bt_ctrl_ret == 0 ? "UP" : "failed");
-          return g_bt_ctrl_ret == 0 ? 0 : 1;
+          if (g_bt_ctrl_ret != 0 || stage < 5)
+            {
+              return g_bt_ctrl_ret == 0 ? 0 : 1;
+            }
+
+            {
+              extern int bk7258_ble_adv_start(const char *name);
+              int aret = bk7258_ble_adv_start("openvela-EPG");
+
+              printf("face: advertising -> %d (%s)\n", aret,
+                     aret == 0 ? "ON AIR as openvela-EPG" : "failed");
+              return aret == 0 ? 0 : 1;
+            }
         }
     }
 
