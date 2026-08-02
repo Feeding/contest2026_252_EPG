@@ -324,6 +324,40 @@ static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
 }
 
 /****************************************************************************
+ * Name: bk7258_ble_txpwr
+ *
+ * Description:
+ *   Report and optionally override the transmit power index.  The
+ *   receiver demonstrably works while nothing hears the transmitter,
+ *   and an index left at the bottom of the table is the cheapest
+ *   explanation: calibration found no factory record, so whatever the
+ *   fallback put here decides how far the advertisement carries.
+ *
+ ****************************************************************************/
+
+extern uint8_t manual_cal_get_ble_pwr_idx(uint8_t channel);
+extern void ble_cal_set_txpwr(uint8_t idx);
+
+int bk7258_ble_txpwr(int idx)
+{
+  uint8_t ch;
+
+  for (ch = 0; ch < 40; ch += 13)
+    {
+      syslog(LOG_INFO, "ble: pwr idx ch%u = %u\n", ch,
+             manual_cal_get_ble_pwr_idx(ch));
+    }
+
+  if (idx >= 0)
+    {
+      ble_cal_set_txpwr((uint8_t)idx);
+      syslog(LOG_INFO, "ble: forced pwr idx %d\n", idx);
+    }
+
+  return 0;
+}
+
+/****************************************************************************
  * Name: bk7258_ble_scan
  *
  * Description:
@@ -492,6 +526,7 @@ uintptr_t bk7258_ble_link_probe(void)
          (uintptr_t)bk7258_ble_adv_start +
          (uintptr_t)bk7258_ble_scan +
          (uintptr_t)bk7258_bt_cal_init +
+         (uintptr_t)bk7258_ble_txpwr +
          (uintptr_t)bt_os_adapter_init +
          (uintptr_t)bluetooth_controller_init +
          (uintptr_t)bk_ble_reg_hci_recv_callback +

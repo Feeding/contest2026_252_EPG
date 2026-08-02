@@ -1784,19 +1784,21 @@ static uint32_t bt_osi_get_test_rfconfig(void)
 
 static uint8_t bt_osi_get_rf_mode(void)
 {
-  uint32_t cfg = rwnx_rfconfig;
+  /* The vendor derives this from rwnx_rfconfig, and doing the same
+   * here answers BT_RF_MODE_WIFI: the variable reads 0x101 on this
+   * board, meaning PLL and role both Wi-Fi.  That is the Wi-Fi PHY
+   * archive's own default, and it is the archive we link -- the
+   * vendor's no-Wi-Fi build takes libcom_phy.a instead.  Answering it
+   * honestly points the transmitter at a Wi-Fi PLL that nothing on
+   * this port ever starts, which is exactly the shape of the symptom:
+   * the receiver hears the room and nothing hears us.
+   *
+   * A BLE-only board runs its own polar modulator, so say so.  The
+   * architecturally clean fix is to link libcom_phy.a instead, which
+   * would make this derivation correct again.
+   */
 
-  if ((cfg & BLUETOOTH_RF_PLL_MASK) == BLUETOOTH_RF_PLL_WIFI)
-    {
-      return BT_RF_MODE_WIFI;
-    }
-
-  if ((cfg & BLUETOOTH_RF_MODE_MASK) == BLUETOOTH_RF_MODE_POLAR)
-    {
-      return BT_RF_MODE_POLAR;
-    }
-
-  return 0;
+  return BT_RF_MODE_POLAR;
 }
 
 /****************************************************************************
@@ -2077,6 +2079,14 @@ struct bt_osi_funcs_t g_bt_osi_funcs =
  *   lines.  Bits 7/8/9 of the routing word are DM/BLE/BT.
  *
  ****************************************************************************/
+
+void bk7258_bt_rf_diag(void)
+{
+  syslog(LOG_INFO, "bt: rwnx_rfconfig %08lx test_rfconfig %08lx "
+                   "rf_mode %u\n",
+         (unsigned long)rwnx_rfconfig, (unsigned long)test_rfconfig,
+         bt_osi_get_rf_mode());
+}
 
 void bk7258_bt_osi_diag(void)
 {
