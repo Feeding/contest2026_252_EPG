@@ -38,6 +38,8 @@
  *
  ****************************************************************************/
 
+#include <nuttx/config.h>
+
 MEMORY
 {
   flash (rx)  : ORIGIN = 0x02010000, LENGTH = 1728K
@@ -62,11 +64,21 @@ MEMORY
    * bank that holds a stack cannot hold .bss is not explained yet.
    *
    * So both live in SRAM2: .data/.bss from the bottom, and the IDLE thread
-   * stack pushed to 0x28034000 by CONFIG_IDLETHREAD_STACKSIZE, above the
-   * boundary.  The heap gets what is left, 0x28034000 to 0x28040000.
+   * stack pushed above the boundary by CONFIG_IDLETHREAD_STACKSIZE.  The
+   * heap gets what is left, up to the end of this region.
+   *
+   * The region runs to 0x28050000 (192K), where the second heap region
+   * registered by boardinit begins -- the 64K above the old 128K limit was
+   * simply unclaimed.  It has to reach that far: the IDLE stack top is
+   * _ebss + CONFIG_IDLETHREAD_STACKSIZE, an arithmetic expression the
+   * linker never range-checks, so .bss growth walks it silently past
+   * LENGTH and up_allocate_heap's (_eram - g_idle_topstack) goes negative.
+   * Linking the closed BLE archives added 37K of .bss and did exactly
+   * that: the heap size wrapped to ~4G and the boot died before a word of
+   * foreign code ran.
    */
 
-  sram  (rwx) : ORIGIN = 0x28020000, LENGTH = 128K
+  sram  (rwx) : ORIGIN = 0x28020000, LENGTH = 192K
 
   /* Top of the camera carve (0x28098000+0x5000 is the YUV line buffer);
    * the remaining 12K hosts SRAM-resident hot code (TJpgDec).
@@ -142,9 +154,13 @@ SECTIONS
         _etbss = ABSOLUTE(.);
     } > flash
 
-    /* Load address of .data, used by __start() to copy it into SRAM */
+    /* Load address of .data, used by __start() to copy it into SRAM.
+     * LOADADDR is the authoritative answer; a location counter read here
+     * only happens to agree while nothing sits between this point and
+     * .data's load address.
+     */
 
-    _eronly = ABSOLUTE(.);
+    _eronly = LOADADDR(.data);
 
     .ram_vectors : {
         *(.ram_vectors)
@@ -156,6 +172,14 @@ SECTIONS
 
         _sdata = ABSOLUTE(.);
         *(.data .data.*)
+
+        /* Closed BLE controller/PHY private data: folding it in here
+         * puts it inside the [_sdata,_edata) boot copy, so it is
+         * initialized like any other data.
+         */
+
+        *(.bt_spec_data*)
+        *(.dtcm_sec_data*)
         *(.gnu.linkonce.d.*)
         CONSTRUCTORS
 
@@ -239,6 +263,18 @@ SECTIONS
      */
 
     PROVIDE(_eram = ORIGIN(sram) + LENGTH(sram));
+
+    /* up_allocate_heap() hands out (_eram - g_idle_topstack), and that top
+     * of stack is _ebss plus a Kconfig constant -- pure arithmetic, which
+     * no region check ever sees.  Let .bss grow past the point where the
+     * sum clears LENGTH and the subtraction goes negative, wrapping the
+     * heap size to ~4G; the board then dies in nx_start() with nothing on
+     * the console.  Fail the link instead.
+     */
+
+    ASSERT(_ebss + CONFIG_IDLETHREAD_STACKSIZE <= ORIGIN(sram) +
+           LENGTH(sram),
+           "IDLE stack top is past the end of the sram region: .bss grew, so raise LENGTH(sram) or lower CONFIG_IDLETHREAD_STACKSIZE")
 
     /* Debug sections */
 

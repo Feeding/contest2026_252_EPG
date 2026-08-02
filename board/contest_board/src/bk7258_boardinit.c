@@ -139,6 +139,17 @@ void board_late_initialize(void)
 
   bk7258_serial_monitor_start();
 
+    {
+      /* Force the BLE staging object (and with it the closed-library
+       * dependency tree) out of libarch.a and into the image.  Needs
+       * the bk_idk checkout on the build host (chip/CMakeLists.txt).
+       */
+
+      extern uintptr_t bk7258_ble_link_probe(void);
+      syslog(LOG_INFO, "ble: staging linked, probe %08x\n",
+             (unsigned)(bk7258_ble_link_probe() & 0xffffffffu));
+    }
+
 #ifdef CONFIG_FS_PROCFS
   /* Mounting procfs is handled by the init script, not here. */
 #endif
