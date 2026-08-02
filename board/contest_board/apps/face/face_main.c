@@ -373,6 +373,26 @@ int main(int argc, char *argv[])
       return 0;
     }
 
+  if (argc > 1 && strcmp(argv[1], "VIBE") == 0)
+    {
+      /* Vibration motor test: face VIBE [ms] [duty%].  Defaults to the
+       * vendor operating point, 300 ms at 30%.
+       */
+
+      extern int bk7258_motor_init(void);
+      extern int bk7258_motor_on(int duty_pct);
+      extern int bk7258_motor_off(void);
+      int ms = (argc > 2) ? atoi(argv[2]) : 300;
+      int duty = (argc > 3) ? atoi(argv[3]) : 30;
+
+      bk7258_motor_init();
+      printf("face: vibe %d ms @ %d%%\n", ms, duty);
+      bk7258_motor_on(duty);
+      usleep(ms * 1000);
+      bk7258_motor_off();
+      return 0;
+    }
+
   if (argc > 1 && strcmp(argv[1], "KEYS") == 0)
     {
       /* Raw button probe: watch the three candidate pins directly and
