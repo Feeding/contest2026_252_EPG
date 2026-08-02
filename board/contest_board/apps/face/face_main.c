@@ -373,6 +373,130 @@ int main(int argc, char *argv[])
       return 0;
     }
 
+  if (argc > 2 && strcmp(argv[1], "PLAY") == 0)
+    {
+      /* WAV playback through the on-chip DAC: face PLAY <name-on-card>.
+       * Mono 8/16 kHz 16-bit PCM only (all vendor prompts qualify).
+       */
+
+      extern int bk7258_audio_dac_init(bool rate16k);
+      extern int bk7258_audio_dac_start(void);
+      extern int bk7258_audio_dac_stop(void);
+      extern int bk7258_audio_dac_write(const int16_t *pcm, int nsamples);
+      extern int bk7258_audio_dac_write2(const uint32_t *frames,
+                                         int nframes);
+
+      char path[48];
+      uint8_t hdr[8];
+      uint8_t fmt[16];
+      uint32_t rate = 0;
+      uint32_t dlen = 0;
+      uint16_t ch = 0;
+      uint16_t bits = 0;
+      uint8_t *buf;
+      int fd;
+      int ret;
+
+      snprintf(path, sizeof(path), "/mnt/%s", argv[2]);
+      fd = open(path, O_RDONLY);
+      if (fd < 0)
+        {
+          printf("face: cannot open %s\n", path);
+          return 1;
+        }
+
+      read(fd, hdr, 8);
+      read(fd, hdr, 4);                     /* "WAVE" */
+      for (; ; )
+        {
+          uint32_t csz;
+
+          if (read(fd, hdr, 8) != 8)
+            {
+              break;
+            }
+
+          csz = hdr[4] | (hdr[5] << 8) | ((uint32_t)hdr[6] << 16) |
+                ((uint32_t)hdr[7] << 24);
+
+          if (memcmp(hdr, "fmt ", 4) == 0 && csz >= 16)
+            {
+              read(fd, fmt, 16);
+              ch   = fmt[2] | (fmt[3] << 8);
+              rate = fmt[4] | (fmt[5] << 8) | ((uint32_t)fmt[6] << 16) |
+                     ((uint32_t)fmt[7] << 24);
+              bits = fmt[14] | (fmt[15] << 8);
+              if (csz > 16)
+                {
+                  lseek(fd, csz - 16 + (csz & 1), SEEK_CUR);
+                }
+            }
+          else if (memcmp(hdr, "data", 4) == 0)
+            {
+              dlen = csz;
+              break;
+            }
+          else
+            {
+              lseek(fd, csz + (csz & 1), SEEK_CUR);
+            }
+        }
+
+      printf("face: %s %luHz %uch %ubit %lu bytes\n", argv[2],
+             (unsigned long)rate, ch, bits, (unsigned long)dlen);
+
+      if (dlen == 0 || ch < 1 || ch > 2 || bits != 16 ||
+          (rate != 16000 && rate != 8000))
+        {
+          printf("face: unsupported format\n");
+          close(fd);
+          return 1;
+        }
+
+      ret = bk7258_audio_dac_init(rate == 16000);
+      if (ret != 0)
+        {
+          printf("face: dac init failed: %d\n", ret);
+          close(fd);
+          return 1;
+        }
+
+      buf = malloc(8192);
+      if (buf == NULL)
+        {
+          close(fd);
+          return 1;
+        }
+
+      bk7258_audio_dac_start();
+      while (dlen > 0)
+        {
+          int n = read(fd, buf, dlen > 8192 ? 8192 : dlen);
+
+          if (n <= 0)
+            {
+              break;
+            }
+
+          if (ch == 2)
+            {
+              bk7258_audio_dac_write2((const uint32_t *)buf, n / 4);
+            }
+          else
+            {
+              bk7258_audio_dac_write((const int16_t *)buf, n / 2);
+            }
+
+          dlen -= n;
+        }
+
+      bk7258_audio_dac_stop();
+      free(buf);
+      close(fd);
+      printf("face: play done\n");
+      return 0;
+    }
+
   if (argc > 1 && strcmp(argv[1], "VIBE") == 0)
     {
       /* Vibration motor test: face VIBE [ms] [duty%].  Defaults to the
