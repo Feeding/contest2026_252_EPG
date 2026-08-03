@@ -106,7 +106,7 @@ CONFIG_ARCH_BOARD_CUSTOM_DIR="../vendor/openvela/boards/contest2026_252_board"
 | `up_putc` | OS 内部日志出口 | `chip/bk7258_serial.c` |
 | `arm_serialinit` | `uart_register("/dev/console", ...)` | `chip/bk7258_serial.c` |
 | `up_timer_initialize` | 系统节拍 | `chip/bk7258_timerisr.c`（SysTick） |
-| 中断 `up_*` + `irq_attach` | 使能/屏蔽/优先级 | `chip/bk7258_irq.c` |
+| 中断 `up_*` + `irq_attach` | 使能/屏蔽/优先级，含 NVIC 之前那道 SoC 路由矩阵 | `chip/bk7258_irq.c` |
 | `up_allocate_heap` | 起始 = `ebss + CONFIG_IDLETHREAD_STACKSIZE`，大小 = RAM 末 − 起始 | `chip/bk7258_allocateheap.c` |
 
 `chip.h` / `irq.h` 有**局部**与**公共**两份：局部放当前目录给芯片代码用；公共放 `chip/include/`，架构层通过 `<arch/chip/chip.h>`、`<arch/irq.h>` 引。
@@ -149,9 +149,15 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 3. **xTS 精简集未跑。** 官方把「通用自测用例」列为**必测**（内存、调度、GPIO、I2C/SPI、UART、RTC、Watchdog）。本仓用的是自建真机验证矩阵（PORTING_NOTES 第十章）。其中 RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章），但**跑的是自建用例，不是 xTS 精简集本身**。
 
    RTC 有两条限制要知道：计数器不跨复位，墙钟时间掉电或重启即丢（`havesettime()` 如实返回 false）；AON 计数率是启动时实测判定的（这块板子是 32000 Hz 内部 ROSC，不是 32768 晶振），改动 `bk7258_rtc.c` 时别把它换成编译期常量。
+4. **中断绑定只用 `irq_attach`。** 官方指南第二章的 `irq_attach_thread` / `irq_attach_wqueue` 一处都没用（两者在本仓 NuttX 里是可用的）。BLE/BT 那三条是**刻意**如此——对齐厂商 `bk_int_isr_register` → `NVIC_EnableIRQ` 的语义，链路层 ISR 本来就该在中断上下文，会阻塞的定时器回调已经走 HPWORK 了（PORTING_NOTES 十三章）。别顺手改成工作队列。
+5. **核间中断与安全属性对本移植 N/A，不是遗漏。** `up_trigger_irq` 未实现（`SMP_NCPUS=1`，NuttX 只跑 CPU0；MBOX0/1 中断号已定义未接）；`up_secure_irq` / `up_secure_irq_all` 由 `armv8-m/arm_secure_irq.c` 提供，受 `CONFIG_ARCH_TRUSTZONE_SECURE` 门控，未开。
+6. **指南本身有几处错，别照抄。** `up_disabled_irq()` / `up_enabled_irq()`（正确是 `up_disable_irq` / `up_enable_irq`）、`irq_attach_work()`（正确是 `irq_attach_wqueue`）、`CONFIG_ARCH_MINIMAL_VECTORTABLE_DYNAMINC`（拼写错，正确是 `_DYNAMIC`）；`up_irq_is_disabled` 和 `irqstate()` 在 Cortex-M 分支根本不提供，那是 Cortex-A/R 的接口。
+
+   中断子系统逐条核对的完整记录见 PORTING_NOTES 十五章，其中三个 `NVIC_SYSH_*` 宏被 `nvicpri.h` 静默覆盖那条尤其值得看——**芯片层 irq.h 不要定义 `MAXNORMAL` / `DISABLE` / `SVCALL` 三个优先级宏**，公共层会覆盖且不告警。
 
 ## 八、纪律
 
 - **公共仓零改动**：`nuttx/`、`packages/`、`vendor/` 一行不能改，全部改动落在本仓。
 - **硬件事实要有出处**：寄存器、中断号、引脚复用值必须标明来自 Datasheet 或 `bk_idk` SDK，不靠推断。
 - **画面/行为只认真机**：编译通过不等于跑通，结论以真机取证为准。
+- **加新 CONFIG 后必须 `distclean` 再编**：cmake 只在初次配置时把 defconfig 展开成 `.config`，之后的 `olddefconfig` 拿的是已有 `.config`，**新加的行会被静默无视**（构建照样成功）。编完 grep 最终 `.config` 确认，比对 `cmake_out/<board>/defconfig.orig` 能看到 cmake 实际吃进去的快照。

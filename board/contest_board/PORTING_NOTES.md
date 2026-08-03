@@ -826,3 +826,99 @@ README 里写的自检命令现在真的能跑。
   AON 总线又慢,这种无上限自旋不该进 tick 中断。
 - **没有公开出处的寄存器就不用。** `_hi` 省下来的那点软件复杂度,
   不值得拿一个猜出来的地址去换。
+
+## 十五、中断子系统:对着官方指南逐条过一遍
+
+官方[中断系统适配指南](../../../docs/zh-cn/chip_porting/Interrupt_System_Adaptation_Guide.md)
+的必做项本移植原本就都在(`up_irqinitialize` / `up_enable_irq` /
+`up_disable_irq` / `NVIC_IRQ_FIRST` / `NR_IRQS` / 四档优先级宏),
+`up_irq_save` 一族由 `arch/arm_m/irq.h` 白送。逐条核对时挖出四件事。
+
+### 三个宏是死代码,而且是静默的
+
+`chip/include/irq.h` 里原本定义了 `NVIC_SYSH_MAXNORMAL_PRIORITY` /
+`NVIC_SYSH_DISABLE_PRIORITY` / `NVIC_SYSH_SVCALL_PRIORITY`,**三个
+全部无效**。`arch/arm/include/irq.h` 先 include 芯片 irq.h(第 49 行)、
+后 include `arch/arm_m/irq.h`(第 66 行),后者拉进的 `nvicpri.h`
+无条件重定义这三个,所以后到的赢。
+
+没有告警,是因为两个头都经 `-isystem` 进来,GCC 默认不报系统头里的
+宏重定义。**用同样的命令行编一个 `#define FOO 1 / #define FOO 2`
+是会报的**,所以别指望编译器帮你发现这类事;用
+`-dM -E` 打预处理终值才看得见:
+
+| 宏 | 板级写的 | 实际生效 |
+| --- | --- | --- |
+| `NVIC_SYSH_MAXNORMAL_PRIORITY` | 0x40 | **0x80** |
+| `NVIC_SYSH_DISABLE_PRIORITY` | 0x40 | **0x80** |
+| `NVIC_SYSH_SVCALL_PRIORITY` | 0x00 | **0x40** |
+
+功能上一直是对的(外设中断全在 0x80,`up_irq_save()` 把 BASEPRI 抬到
+0x80 正好全屏蔽,SVCall 在 0x40 不被屏蔽),但注释宣称的和跑的不是
+一回事,而且 0x40 那一档成了"屏蔽不掉的准零延迟档" —— 将来谁把某条
+中断提到 0x40,它就能在临界区里插进来。三个宏已删,由公共层统一给,
+和主线 stm32l5/u5、nrf53 等 armv8-m 芯片的做法一致。
+
+### 优先级是 3 位,不是 2 位
+
+`__NVIC_PRIO_BITS` 在
+`bk_avdk_smp/ap/components/cmsis/CMSIS_5/Device/Beken/armstar/armstar.h:59`
+是 **3**(armstar = STAR-MC1),即 bits[7:5],八档。所以补上了指南要求
+但原本缺的 `NVIC_SYSH_PRIORITY_SUBSTEP 0x20` —— bits[7:6] 做 group、
+bit[5] 做 sub,和指南 rtl8720c 样板的划分一致。这不是抄格式,bit[5]
+确实存在。
+
+同时打开了 `CONFIG_ARCH_IRQPRIO`。在此之前 `up_prioritize_irq()` 写好了
+但压根没编进去(`# CONFIG_ARCH_IRQPRIO is not set`),3 位优先级的硬件
+能力一位都没用上。镜像成本 0 —— 暂时没人调用,`--gc-sections` 直接回收。
+
+### 精简向量表:省 240 字节,附带一个要知道的副作用
+
+`NR_IRQS` 是 76,而真正 attach 的只有 10 条:SVCall、HardFault、
+SysTick、UART0、GPIO、RTC、DM、BLE、BT,加 MPU 打开时的 MemFault。
+`g_irqvector[76]` 白占 608 字节。已开:
+
+```
+CONFIG_ARCH_MINIMAL_VECTORTABLE=y
+CONFIG_ARCH_MINIMAL_VECTORTABLE_DYNAMIC=y
+CONFIG_ARCH_NUSER_INTERRUPTS=24
+```
+
+实测 `.bss` 143248 → 143008。符号级:`g_irqvector` 608→192,新增
+`g_irqmap` 76、`g_irqrevmap` 96。注意 `g_irqrevmap` 是 `int[NUSER]`,
+指南没提这一块,所以别按指南的算法估收益。
+
+**副作用要记住**:DYNAMIC 模式下 `irq_dispatch()` 走
+`IRQ_TO_NDX()`,未映射的中断号会在**中断上下文里**调 `irq_to_ndx()`
+分配一个槽位,并且 `DEBUGASSERT(g_irqmap_count < NUSER)`。也就是说
+每来一次意外中断就永久烧掉一个槽,烧光了会在中断上下文断言。
+24 对 10 留了 14 格余量,够用;但**将来加中断线时要把 NUSER 一起抬**,
+而且如果开始追一个反复触发的意外中断,先想到这条。
+
+### NVIC 之前那道闸,初始化时也要清
+
+第四章讲过 SoC 路由矩阵。`up_disable_irq()` 一直是 NVIC 和矩阵两边
+都清,但 `up_irqinitialize()` 原来只清 NVIC —— bootloader 交接时它
+自己路由的线(至少 UART0)还留在矩阵里,两道闸对不上。已在初始化
+循环里补 `putreg32(0, BK7258_SYS_CPU0_INT_EN(i))`。不丢功能:驱动
+认领某条线时 `up_enable_irq()` 会把矩阵位再置回去。
+
+### 教训:改了 defconfig 不等于 .config 生效
+
+这次 `CONFIG_ARCH_MINIMAL_VECTORTABLE=y` 写进 defconfig、构建成功、
+**`.config` 里却是 `# ... is not set`**,连编两遍都一样。原因是
+cmake 只在初次配置时把 defconfig 展开成 `.config`,之后的 `olddefconfig`
+是拿**已有的 `.config`** 跑的,新加的行根本没被读。`CONFIG_ARCH_IRQPRIO`
+那次侥幸赶上了一次全量重配才生效。
+
+排查这类事看 `cmake_out/<board>/defconfig.orig` —— 那是 cmake 当时
+真正吃进去的快照,一比就知道。**加新 CONFIG 后要 `distclean` 再编**,
+然后照第五章那条老纪律 grep 最终 `.config` 确认。
+
+### 这一章的验证边界
+
+以上全部是**构建级取证**:`.config` 取值、`nm` 符号尺寸、`objdump`
+确认 `0x44010080` 进了 `up_irqinitialize` 的常量池、`-dM` 预处理终值。
+**没有上板**。前三项(宏、SUBSTEP、IRQPRIO)预处理终值与改动前逐字节
+一致,不改变行为;但**矩阵清零是真的动了启动时序**,碰的又正是当年
+把控制台 RX 弄死的那套闸门,按本仓纪律得真机复验才算数。
