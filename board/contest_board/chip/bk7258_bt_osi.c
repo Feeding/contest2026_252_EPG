@@ -110,19 +110,6 @@
 #define BT_OSI_RF_BY_BLE_BIT        (1u << 1)
 #define BT_OSI_RF_BY_ATE_BT_BIT     (1u << 4)
 
-/* CP-side RF arbitration encodings from bk_rf_internal.h.  These are not
- * the old AP-side "Wi-Fi PLL hold bit" commands: the AVDK controller passes
- * a complete RF path/PLL/priority request and libcom_phy owns the switch.
- */
-
-#define BT_OSI_RF_MODULE_BLE_BT     0u
-#define BT_OSI_RF_OPERATION_FREE    1u
-#define BT_OSI_RF_OPERATION_APPLY   2u
-
-/* PHY sub-domain identity used by the SDK power manager. */
-
-#define BT_OSI_PWR_SUB_PHY_BT       (10u * 20u)
-
 /* The rate index the vendor files BLE calibration results under. */
 
 #define BT_OSI_EVM_BLE_RATE         158
@@ -135,10 +122,6 @@
 #define BLUETOOTH_RF_PLL_MASK       0xf
 #define BLUETOOTH_RF_MODE_POLAR     0x10
 #define BLUETOOTH_RF_MODE_MASK      0xf0
-
-/* wifi_standard::WIFI_STANDARD_NONE_POLAR in the AVDK PHY API. */
-
-#define BT_OSI_WIFI_STANDARD_NONE_POLAR 7
 
 #define BLUETOOTH_CLK_32K           32000
 #define BLUETOOTH_CLK_32768         32768
@@ -265,9 +248,7 @@ struct bt_osi_funcs_t
 
   void (*_manual_cal_save_ble_txpwr)(uint32_t channel, uint32_t pwr_gain);
 
-  uint32_t (*_bt_rf_pll_ctrl)(uint32_t apply, uint8_t rf_mode,
-                              uint8_t rf_pll,
-                              uint8_t ble_priority_level);
+  uint32_t (*_bt_rf_pll_ctrl)(uint32_t set);
   void (*_reboot)(void);
   int (*_uart_read_byte_ex)(uint8_t id, uint8_t *ch);
   int (*_bt_vote_sleep_ctrl)(uint32_t sleep_state, uint32_t sleep_time);
@@ -293,9 +274,6 @@ struct bt_osi_funcs_t
   void (*_ble_enter_dut)(void);
   void (*_ble_exit_dut)(void);
   uint8_t (*_set_bluetooth_power_level)(float pwr_gain);
-  int (*_bluetooth_int_isr_unregister)(uint8_t type);
-  void (*_set_rfconfig_rf_mode)(uint8_t mode);
-  int (*wifi_mac_power_ctrl)(uint8_t power_state);
 };
 
 /* Ring buffer behind the OSI queue API.  NuttX message queues need a file
@@ -371,11 +349,7 @@ extern void ble_cal_enter_txpwr(void);
 extern void ble_cal_enter_dut(void);
 extern void ble_cal_exit_dut(void);
 extern uint8_t get_ble_txpwr_table_size(void);
-extern uint8_t get_bt_polar_txpwr_table_size(void);
 extern void rf_module_vote_ctrl(uint8_t cmd, uint32_t module);
-extern uint32_t rf_pll_ctrl(uint32_t module_type, uint32_t operation,
-                            uint32_t rf_path, uint32_t rf_pll,
-                            uint32_t priority, bool save_when_failed);
 extern void manual_cal_save_txpwr(uint32_t rate, uint32_t channel,
                                   uint32_t pwr_gain);
 extern uint32_t manual_cal_txpwr_tab_ready_in_flash(void);
@@ -1133,14 +1107,6 @@ static int bt_osi_coex_init(void)
  ****************************************************************************/
 
 volatile uint32_t g_bt_isr_hits;
-static volatile uint32_t g_bt_rf_vote_open;
-static volatile uint32_t g_bt_rf_vote_close;
-static volatile uint32_t g_bt_rf_pll_apply;
-static volatile uint32_t g_bt_rf_pll_free;
-static volatile uint32_t g_bt_rf_pll_last;
-static volatile uint8_t  g_bt_rf_pll_mode;
-static volatile uint8_t  g_bt_rf_pll_sel;
-static volatile uint8_t  g_bt_rf_pll_prio;
 
 static int bt_osi_isr_handler(int irq, void *context, void *arg)
 {
@@ -1218,20 +1184,6 @@ static int bt_osi_int_isr_register(uint8_t type, void *isr, void *arg)
     }
 
   up_enable_irq(irq);
-  return 0;
-}
-
-static int bt_osi_int_isr_unregister(uint8_t type)
-{
-  int irq = bt_osi_type_to_irq(type);
-
-  if (irq < 0)
-    {
-      return -1;
-    }
-
-  up_disable_irq(irq);
-  irq_detach(irq);
   return 0;
 }
 
@@ -1331,11 +1283,10 @@ static int bt_osi_bluetooth_power_ctrl(uint8_t power_state)
 
 static int bt_osi_phy_power_ctrl(uint8_t power_state)
 {
-  extern int bk7258_phy_power_vote(unsigned int module,
-                                   uint32_t power_state);
-
-  return bk7258_phy_power_vote(BT_OSI_PWR_SUB_PHY_BT,
-                               power_state ? 0 : 1);
+  modifyreg32(BT_OSI_SYS_POWER,
+              power_state ? BT_OSI_PWD_WIFP_PHY : 0,
+              power_state ? 0 : BT_OSI_PWD_WIFP_PHY);
+  return 0;
 }
 
 /****************************************************************************
@@ -1442,7 +1393,7 @@ static int bt_osi_get_bluetooth_mac(uint8_t *mac)
 {
   static const uint8_t placeholder[6] =
   {
-    0xd2, 0x52, 0x26, 0x08, 0x03, 0x01
+    0xc8, 0x47, 0x8c, 0x25, 0x20, 0x26
   };
 
   if (mac == NULL)
@@ -1685,15 +1636,6 @@ static void bt_osi_rs_deinit(void)
 
 static void bt_osi_ble_vote_rf_ctrl(uint8_t cmd)
 {
-  if (cmd != 0)
-    {
-      g_bt_rf_vote_open++;
-    }
-  else
-    {
-      g_bt_rf_vote_close++;
-    }
-
   rf_module_vote_ctrl(cmd, BT_OSI_RF_BY_BLE_BIT);
 }
 
@@ -1721,38 +1663,17 @@ static void bt_osi_manual_cal_save_ble_txpwr(uint32_t channel,
  * Name: bt_osi_bt_rf_pll_ctrl
  *
  * Description:
- *   Forward the controller's CP-side RF path/PLL request to libcom_phy.
- *   The similarly named callback in the older AP SDK only held a Wi-Fi PLL
- *   and could be stubbed when Wi-Fi was absent.  AVDK's CP controller uses
- *   the expanded callback to apply/free the actual BLE RF path, even in a
- *   Bluetooth-only image.  Pretending success leaves HCI advertising
- *   enabled while the hardware path stays released after a later switch.
+ *   Stub returning success, matching the vendor with Wi-Fi disabled.  The
+ *   call asks the arbiter to hold the Wi-Fi PLL on behalf of bluetooth;
+ *   with no Wi-Fi in the image the BT PLL is the only one running and
+ *   there is nothing to hold.
  *
  ****************************************************************************/
 
-static uint32_t bt_osi_bt_rf_pll_ctrl(uint32_t apply, uint8_t rf_mode,
-                                      uint8_t rf_pll,
-                                      uint8_t ble_priority_level)
+static uint32_t bt_osi_bt_rf_pll_ctrl(uint32_t set)
 {
-  uint32_t ret = rf_pll_ctrl(BT_OSI_RF_MODULE_BLE_BT,
-                            apply ? BT_OSI_RF_OPERATION_APPLY :
-                                    BT_OSI_RF_OPERATION_FREE,
-                            rf_mode, rf_pll, ble_priority_level, false);
-
-  if (apply != 0)
-    {
-      g_bt_rf_pll_apply++;
-    }
-  else
-    {
-      g_bt_rf_pll_free++;
-    }
-
-  g_bt_rf_pll_last = ret;
-  g_bt_rf_pll_mode = rf_mode;
-  g_bt_rf_pll_sel  = rf_pll;
-  g_bt_rf_pll_prio = ble_priority_level;
-  return ret;
+  UNUSED(set);
+  return 0;
 }
 
 /****************************************************************************
@@ -1973,9 +1894,11 @@ static void bt_osi_ble_exit_dut(void)
  * Name: bt_osi_set_bluetooth_power_level
  *
  * Description:
- *   Reproduces the vendor sequence for either RF path.  The SDK wrappers
- *   differ only in the calibration-table selector.  The index reported
- *   back is clamped to the active table, but -- as in the vendor -- the
+ *   Reproduces the vendor sequence.  bk_ble_set_tx_power() is SDK glue and
+ *   is not in any archive here, so its one-line body is inlined: it is
+ *   manual_cal_set_tx_power() with the "not a Wi-Fi standard" selector,
+ *   which is how the calibration layer spells BLE.  The index reported
+ *   back is clamped to the table, but -- as in the vendor -- the
  *   unclamped index is the one programmed.
  *
  ****************************************************************************/
@@ -1985,47 +1908,13 @@ static uint8_t bt_osi_set_bluetooth_power_level(float pwr_gain)
   uint8_t max_index;
   uint8_t index;
 
-  if ((rwnx_rfconfig & BLUETOOTH_RF_MODE_MASK) ==
-      BLUETOOTH_RF_MODE_POLAR)
-    {
-      manual_cal_set_tx_power(BT_OSI_WIFI_STANDARD_NONE_POLAR, pwr_gain);
-      max_index = get_bt_polar_txpwr_table_size() - 1;
-    }
-  else
-    {
-      manual_cal_set_tx_power(0, pwr_gain);
-      max_index = get_ble_txpwr_table_size() - 1;
-    }
+  manual_cal_set_tx_power(0, pwr_gain);
 
   index = manual_cal_get_ble_pwr_idx(19);
+  max_index = get_ble_txpwr_table_size() - 1;
   ble_cal_set_txpwr(index);
 
   return index > max_index ? max_index : index;
-}
-
-static void bt_osi_set_rfconfig_rf_mode(uint8_t mode)
-{
-  extern void ble_enter_iq_mode(void);
-  extern void ble_enter_polar_mode(void);
-
-  /* AVDK's callback argument is a switch request, not RF_MODE_POLAR from
-   * bt_feature_config.h: 1 selects polar and 0 selects IQ.
-   */
-
-  if (mode == 1)
-    {
-      ble_enter_polar_mode();
-    }
-  else if (mode == 0)
-    {
-      ble_enter_iq_mode();
-    }
-}
-
-static int bt_osi_wifi_mac_power_ctrl(uint8_t power_state)
-{
-  UNUSED(power_state);
-  return 0;
 }
 
 /****************************************************************************
@@ -2163,29 +2052,57 @@ struct bt_osi_funcs_t g_bt_osi_funcs =
   ._ble_enter_dut                       = bt_osi_ble_enter_dut,
   ._ble_exit_dut                        = bt_osi_ble_exit_dut,
   ._set_bluetooth_power_level           = bt_osi_set_bluetooth_power_level,
-  ._bluetooth_int_isr_unregister        = bt_osi_int_isr_unregister,
-  ._set_rfconfig_rf_mode                = bt_osi_set_rfconfig_rf_mode,
-  .wifi_mac_power_ctrl                  = bt_osi_wifi_mac_power_ctrl,
 };
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_bt_osi_init
+ *
+ * Description:
+ *   Hand the OS abstraction table to the closed bluetooth controller.
+ *   Must run before any other controller entry point; the library's
+ *   return value is passed through unchanged, and a non-zero value means
+ *   it rejected the table (version or size mismatch).
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_bt_osi_diag
+ *
+ * Description:
+ *   Report whether the radio's interrupts actually reach the CPU: the
+ *   hit count, the SoC routing matrix word that gates lines 32..63
+ *   ahead of the NVIC, and the NVIC enable word covering the same
+ *   lines.  Bits 7/8/9 of the routing word are DM/BLE/BT.
+ *
+ ****************************************************************************/
 
 /****************************************************************************
  * Name: bt_osi_ble_pwr_idx
  *
  * Description:
- *   Return the per-channel calibration result unchanged, matching AVDK's
- *   get_ble_pwr_idx_wrapper().  An arbitrary floor can be outside the
- *   active polar table and is not a valid substitute for calibration.
+ *   The controller asks for a transmit level per channel and applies
+ *   the answer itself, so this callback is the only place a level
+ *   actually sticks -- setting one before advertising starts is
+ *   overwritten on the first event, which is why an earlier override
+ *   proved nothing.  The library's own answer comes from a calibration
+ *   that had no factory record and read TSSI with the transmitter
+ *   possibly unkeyed, so a plausible-looking index can still mean no
+ *   output.  Clamp upward while the receiver works and nothing hears
+ *   the transmitter; if this is what carries, the calibrated value is
+ *   the thing to fix rather than this floor.
  *
  ****************************************************************************/
 
 static uint8_t bt_osi_ble_pwr_idx(uint8_t channel)
 {
-  return manual_cal_get_ble_pwr_idx(channel);
-}
+  uint8_t idx = manual_cal_get_ble_pwr_idx(channel);
 
-/****************************************************************************
- * Public Functions
- ****************************************************************************/
+  return idx < 60 ? 60 : idx;
+}
 
 void bk7258_bt_rf_diag(void)
 {
@@ -2193,15 +2110,6 @@ void bk7258_bt_rf_diag(void)
                    "rf_mode %u\n",
          (unsigned long)rwnx_rfconfig, (unsigned long)test_rfconfig,
          bt_osi_get_rf_mode());
-  syslog(LOG_INFO,
-         "bt: rf votes open/close %lu/%lu, pll apply/free %lu/%lu "
-         "last=%lu path=%u pll=%u prio=%u\n",
-         (unsigned long)g_bt_rf_vote_open,
-         (unsigned long)g_bt_rf_vote_close,
-         (unsigned long)g_bt_rf_pll_apply,
-         (unsigned long)g_bt_rf_pll_free,
-         (unsigned long)g_bt_rf_pll_last,
-         g_bt_rf_pll_mode, g_bt_rf_pll_sel, g_bt_rf_pll_prio);
 }
 
 void bk7258_bt_osi_diag(void)

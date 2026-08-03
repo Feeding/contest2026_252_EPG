@@ -68,22 +68,23 @@ endif()
 set(BK_AVDK_BT_LIBS
     "${BK_AVDK_ROOT}/cp/components/bk_libs/bk7258/libs")
 
-if(EXISTS ${BK_AVDK_BT_LIBS}/libbluetooth_controller_controller_only_ble.a)
+set(BK_IDK_LIBS /Users/apple/app/github.com/bk_idk/components/bk_libs/bk7258/libs)
+
+if(EXISTS ${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
   list(APPEND SRCS bk7258_ble.c bk7258_ble_shim.c bk7258_vnd_cal.c
                    bk7258_bt_osi.c bk7258_phy_osi.c bk7258_saradc.c)
-  # This port drives the controller directly through its HCI boundary and
-  # deliberately does not initialize Beken's GAP/GATT host.  Use the archive
-  # built for that exact CONFIG_BTDM_CONTROLLER_ONLY arrangement; pairing the
-  # regular BLE controller with an uninitialized host leaves its HCI event
-  # path in a mixed configuration.
-  nuttx_add_extra_library(
-    ${BK_AVDK_BT_LIBS}/libbluetooth_controller_controller_only_ble.a)
-  # The no-Wi-Fi PHY paired with the controller-only BLE archive by AVDK.
-  nuttx_add_extra_library(${BK_AVDK_BT_LIBS}/libcom_phy.a)
+  # Reverted to the bk_idk archives.  The AVDK migration (ff1d219) bundled
+  # this swap with unrelated RTC work and reception was never re-checked
+  # afterwards; measured back to back on the same board and minute, the
+  # bk_idk pair hears 2649 advertisers in ten seconds and the AVDK pair
+  # hears none.  Polar RF goes away with it -- only AVDK exposes
+  # ble_enter_polar_mode -- and that is the trade this makes.
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_host_ble.a)
+  nuttx_add_extra_library(${BK_IDK_LIBS}/libcom_phy.a)
 else()
   message(FATAL_ERROR
-    "BK7258 BLE libraries not found under ${BK_AVDK_BT_LIBS}; "
-    "set BK_AVDK_ROOT to the bk_avdk_smp checkout")
+    "BK7258 BLE libraries not found under ${BK_IDK_LIBS}")
 endif()
 
 if(CONFIG_BK7258_HCI_TRANSPORT)
