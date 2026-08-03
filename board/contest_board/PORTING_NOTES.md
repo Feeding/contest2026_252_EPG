@@ -252,8 +252,9 @@ PSRAM 供不起行级带宽)→ JPEG 编码器(量化表必须软件载入,硬�
 ## 八、内存:从 42KB 堆到 370KB
 
 链接脚本约束见 README(SP 下限 0x28032468、`.bss` 必须低)。
-运行时用 `kumm_addregion((void*)0x28050000, 0x50000)` 把
-SRAM4/5 并入堆(黑匣子记录区 0x28048000 除外),42KB → 370KB。
+运行时用 `kumm_addregion((void*)_ebbnote, 0x28098000 - _ebbnote)` 把
+SRAM4/5 并入堆,42KB → 370KB。起点取 `_ebbnote` 而不是写死地址,是为了把黑匣子
+记录区(`_bbnote`,链接区上沿 128 字节)留在所有堆之外。
 本树没有 `up_addregion` 钩子,挂在 `board_late_initialize`。
 
 ## 九、未竟事项
@@ -922,3 +923,104 @@ cmake 只在初次配置时把 defconfig 展开成 `.config`,之后的 `olddefco
 **没有上板**。前三项(宏、SUBSTEP、IRQPRIO)预处理终值与改动前逐字节
 一致,不改变行为;但**矩阵清零是真的动了启动时序**,碰的又正是当年
 把控制台 RX 弄死的那套闸门,按本仓纪律得真机复验才算数。
+
+## 十六、蓝牙上手机：两个回归，一条链路
+
+**现象**：手机 nRF Connect 始终扫不到板子。这个症状挂了几周，期间的结论是
+「所有 HCI 命令都返回成功、射频投票按广播事件周期变化、但空口没有信号」。
+
+**取证**：把 OpenVela 蓝牙服务（ZBlue 主机 + `bluetoothd` + `bttool`）接上
+之后，症状分解成三个可独立测量的问题，逐个上板证伪：
+
+### 1. 每条 HCI 命令恰好 10.000 秒
+
+驱动里加了带时间戳的有界收发轨迹（`face HCIT`），真机profile 一看就懂：
+
+```
++20ms     > cmd 1003      +10010ms  < evt 0e     ← 整 10 秒
++10010ms  > cmd 1001      +20010ms  < evt 0e     ← 整 10 秒
++141280ms > cmd 0c13      +141280ms < evt 0f     ← 被拒的，0 ms
+```
+
+整数 10 秒不是硬件时延，是超时。根因在 `enter_normal_app_mode()` 的主循环：
+`if (ble_ps_enabled()) rwip_sleep();` 然后才 `rwip_schedule()`，而
+`ble_ps_enable_set()` 开机就无条件把它打开（忽略参数直接存 1）。厂商自己的
+安排里是 UART 收发中断把芯片唤醒，这个移植的 HCI 走函数调用，**没有那个
+唤醒源**，控制器睡下去只能等定时器。
+
+**修法**：控制器初始化末尾 `ble_ps_enable_clear()`。适配器 enable 从 141 秒
+降到 1.4 秒，`adv start` 从 `START_TIMEOUT` 变成 `status:0`。代价是空闲功耗。
+`bk7258_bt_ps_keep()` 保留了两种都能测的开关。
+
+### 2. AVDK 迁移打坏了射频（收发都坏）
+
+`ff1d219` 把闭源归档从 bk_idk 换成 bk_avdk_smp，和 RTC/看门狗一起提交，
+之后射频再没被验证过。同一块板、同一分钟、连续两轮：
+
+| 归档 | `face BT 6` 接收（10 秒） | 裸 HCI 广播 |
+| --- | --- | --- |
+| bk_avdk_smp | **0** | 扫不到 |
+| bk_idk | **2540–2649 个广播者** | **−53 dBm 扫到** |
+
+排查途中排除掉的（每条都上板测过）：controller-only vs controller+host
+归档（AVDK 树内换，仍 0）、省电开关（A/B 都 0）、HCI 驱动实现（手写字符
+设备和公共仓 BTH4 给出逐毫秒相同的时序）、传统 vs 扩展 HCI 操作码（都 0）。
+
+**注意**：单换归档回不去——`ble_enter_iq_mode` / `ble_enter_polar_mode` /
+`txpwr_max_set_bt_iq` 是 AVDK 专有符号，C 代码和归档是绑定的，要连
+`bk7258_ble.c` / `bk7258_bt_osi.c` / `bk7258_phy_osi.c` 的射频部分一起退。
+
+### 3. 控制器接受扩展广播命令但不发射
+
+退回 bk_idk 之后，同一个镜像上：
+
+- 服务默认走扩展广播（`2036`/`2037`/`2039`），三条命令**全部 Command
+  Complete 成功**，空口**无信号**；
+- `adv start -m legacy`（传统 PDU），**手机立刻扫到**。
+
+所以那三条扩展命令是被接受了但没有真正发出去。需要
+`CONFIG_BT_EXT_ADV_LEGACY_SUPPORT=y` 且运行时选 legacy 模式。
+`CONFIG_BT_EXT_ADV` 本身不能关——服务的
+`sal_le_advertise_interface.c` 无条件调 `bt_le_ext_adv_*`，关掉直接链接失败。
+
+**终局取证**：nRF Connect 扫到 `EPGSVC5432`，`C8:47:8C:25:20:26`，−69 dBm，
+Advertising type: Legacy，LE General Discoverable。这个 MAC 正是几周里
+一直在找、一直扫不到的那一个。
+
+**教训**：
+1. 一个症状可以是三个独立故障叠出来的。「命令成功但空口没信号」在三条
+   都修完之前，看起来始终是同一个不可解的问题。
+2. **归档迁移必须单独提交并单独验证。** 这次和 RTC 一起提交，直接导致
+   射频回归几周没人发现。
+3. 时间戳比推理值钱。10.000 秒这个整数一出现，「硬件慢」的整条假设链
+   立刻塌掉——加时间戳之前我为此下过三次错判并逐一撤回。
+
+## 十七、蓝牙服务上板：配置依赖清单
+
+把 OpenVela 蓝牙服务（`frameworks/connectivity/bluetooth` + ZBlue）在本板
+跑起来，卡点全是硬依赖，逐条记下省得重走：
+
+| 缺口 | 解 |
+| --- | --- |
+| `BLUETOOTH` 依赖 `LIBUV_EXTENSION` | 在 `frameworks/system/utils/uv`，打开即可 |
+| libuv 需要 `TLS_TASK_NELEM` | `CONFIG_TLS_NELEM=4` / `TLS_TASK_NELEM=4` |
+| `UNQLITE` 依赖 `FS_LOCK_BUCKET_SIZE>0` | 设成 4（本树无 KVDB，存储只能走 UNQLITE） |
+| zblue 纯 BLE 编不过 | `att.c` 在 `IS_ENABLED(CONFIG_BT_ATT_OVER_BR)` 里用了只在 `#if` 下定义的 `br_chan`；`BT_CLASSIC` 必须编译期开，运行期 `bt_br_init` 由控制器能力位门控会自动跳过 |
+| `BLE scan + 服务` 绑死 socket IPC | `scan_manager.c` 无条件调 `bt_socket_server_is_busy()`，只能 `SOCKET_IPC` + `bluetoothd` + `NET_LOCAL`，`FRAMEWORK_LOCAL` 编不过 |
+| PSA crypto 找不到 | zblue `select MBEDTLS` 选错了名字，真正的依赖是 `CRYPTO_MBEDTLS` |
+| mbedtls 要熵 | 补 `CONFIG_DEV_URANDOM` + `DEV_URANDOM_XORSHIFT128` |
+| `psa_crypto_init` 踩爆线程栈 | `SYSTEM_WORKQUEUE_STACK_SIZE` 4056 → 32768 |
+| `/data/misc/bt` 建不出来 | 板级挂 tmpfs 到 `/data`（路径在服务里写死） |
+
+**RAM 账**：蓝牙原始代价 +217 KB，其中 **`g_gatt_client` 一个符号 147.6 KB**
+（框架侧按 8 连接 × 20 服务 × 100 特征静态开）。关掉框架侧 GATT 客户端 +
+AVRCP/AVCTP + BT log 后降到 +60 KB。IDLE 栈从 74648 降到 16384（实测只用过
+1288 字节）腾给工作队列。链接区 192K → 256K（SRAM2+SRAM3）。
+
+**驱动走官方路径**：按官方
+[如何添加一个蓝牙驱动](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/device_dev_guide/connection/bluetooth/how_to_add_a_bluetooth_driver.md)，
+`chip/bk7258_hci.c` 实现 `struct bt_driver_s`（open/send/close + 控制器回调），
+`bt_driver_register()` 注册，`/dev/ttyHCI0` 由公共仓 `uart_bth4.c` 生成。
+H4 拆帧、跨次写入重组、接收环、read/poll 全部属于 BTH4，不要自己重写一遍
+——本移植早期版本重写过，行为一致但每换一个上层协议栈就要重新验证一次。
+`head_reserve = 1` 让 H4 类型字节原地回填，不用拷贝。
