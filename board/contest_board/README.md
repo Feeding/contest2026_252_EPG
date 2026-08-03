@@ -245,6 +245,8 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 - [x] I2C 主机 ×2 + 位敲备胎（引擎验证,待正向应答从机）
 - [x] 双 GC9D01 屏全部走硬件 QSPI（61 字缓冲 RAM 结案,PORTING_NOTES 七章）
 - [x] `eyes` 机器人眼动画应用（17fps 实测）
+- [x] AON RTC（`/dev/rtc0` + 系统时钟源，计数率实测判定 32000 Hz ROSC）
+- [x] 看门狗字符驱动（`/dev/watchdog0`，`wdog` 真机验证会咬人，PORTING_NOTES 十四章）
 
 ### 内存布局约束（实测所得）
 

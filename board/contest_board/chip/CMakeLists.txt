@@ -24,6 +24,14 @@ set(SRCS bk7258_start.c bk7258_irq.c bk7258_lowputc.c bk7258_allocateheap.c
          bk7258_gpio.c bk7258_clockconfig.c bk7258_timerisr.c
     bk7258_idle.c bk7258_wdt.c bk7258_psram.c bk7258_pwm.c bk7258_audio.c)
 
+if(CONFIG_BK7258_RTC)
+  list(APPEND SRCS bk7258_rtc.c)
+endif()
+
+if(CONFIG_BK7258_WDT)
+  list(APPEND SRCS bk7258_wdt_lowerhalf.c)
+endif()
+
 if(CONFIG_MMCSD)
   list(APPEND SRCS bk7258_sdio.c)
 endif()
@@ -48,26 +56,34 @@ if(CONFIG_BK7258_UART0 OR CONFIG_BK7258_UART1 OR CONFIG_BK7258_UART2)
   list(APPEND SRCS bk7258_serial.c)
 endif()
 
-# Closed-source BLE controller/host + RF PHY archives (Beken bk_idk on the
-# build host; ABI: armv8-m.main / fpv5-sp-d16 / hard float, verified).  The
-# BLE staging compiles only when the SDK checkout is present.
+# Closed-source BLE controller + RF PHY archives from the BK7258 CP side of
+# Beken AVDK (ABI: armv8-m.main / fpv5-sp-d16 / hard float, verified).  This
+# is the same stack generation used by projects/bluetooth/polar; unlike the
+# older IDK pair it exposes the BK7258 polar RF path and its matching OSI ABI.
 
-set(BK_IDK_LIBS /Users/apple/app/github.com/bk_idk/components/bk_libs/bk7258/libs)
+set(BK_AVDK_ROOT "$ENV{BK_AVDK_ROOT}")
+if(NOT BK_AVDK_ROOT)
+  get_filename_component(BK_AVDK_ROOT "${NUTTX_DIR}/../../bk_avdk_smp" ABSOLUTE)
+endif()
+set(BK_AVDK_BT_LIBS
+    "${BK_AVDK_ROOT}/cp/components/bk_libs/bk7258/libs")
 
-if(EXISTS ${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
+if(EXISTS ${BK_AVDK_BT_LIBS}/libbluetooth_controller_controller_only_ble.a)
   list(APPEND SRCS bk7258_ble.c bk7258_ble_shim.c bk7258_vnd_cal.c
                    bk7258_bt_osi.c bk7258_phy_osi.c bk7258_saradc.c)
-  nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
-  nuttx_add_extra_library(${BK_IDK_LIBS}/libbluetooth_host_ble.a)
-  # The BT-only PHY, which is what the vendor's BLE-only projects link
-  # (their configs carry no CONFIG_WIFI_ENABLE).  Both archives export
-  # the same 401 symbols, so this is a swap of implementations, not of
-  # interfaces -- and the two implementations differ exactly where this
-  # port has been getting hurt: libbk_phy's nv_init branches through a
-  # table slot the no-Wi-Fi configuration leaves NULL, and it brings up
-  # an RF config that points the transmitter at a Wi-Fi PLL a BLE-only
-  # build never starts.  libcom_phy's nv_init is a single bx lr.
-  nuttx_add_extra_library(${BK_IDK_LIBS}/libcom_phy.a)
+  # This port drives the controller directly through its HCI boundary and
+  # deliberately does not initialize Beken's GAP/GATT host.  Use the archive
+  # built for that exact CONFIG_BTDM_CONTROLLER_ONLY arrangement; pairing the
+  # regular BLE controller with an uninitialized host leaves its HCI event
+  # path in a mixed configuration.
+  nuttx_add_extra_library(
+    ${BK_AVDK_BT_LIBS}/libbluetooth_controller_controller_only_ble.a)
+  # The no-Wi-Fi PHY paired with the controller-only BLE archive by AVDK.
+  nuttx_add_extra_library(${BK_AVDK_BT_LIBS}/libcom_phy.a)
+else()
+  message(FATAL_ERROR
+    "BK7258 BLE libraries not found under ${BK_AVDK_BT_LIBS}; "
+    "set BK_AVDK_ROOT to the bk_avdk_smp checkout")
 endif()
 
 target_sources(arch PRIVATE ${SRCS})

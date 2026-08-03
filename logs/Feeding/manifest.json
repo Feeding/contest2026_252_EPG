@@ -39,7 +39,44 @@
       "collection_mode": "cli",
       "health": "ok",
       "model": "claude-opus-5"
+    },
+    {
+      "session_id": "f3924ff8-1aa1-43c3-b34f-87bd3f0ffa96",
+      "tool": "claude-code",
+      "started_at": "2026-08-03T03:30:52.892Z",
+      "last_event_at": "2026-08-03T03:30:52.892Z",
+      "event_count": 2621,
+      "raw_event_count": 3594,
+      "file_path": "logs/Feeding/2026-08-03/claude-code__f3924ff8-1aa1-43c3-b34f-87bd3f0ffa96.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-fable-5"
+    },
+    {
+      "session_id": "9e30bbe2-a6fa-400d-80fa-4e2a57ed56ff",
+      "tool": "claude-code",
+      "started_at": "2026-08-03T03:30:53.123Z",
+      "last_event_at": "2026-08-03T03:30:53.123Z",
+      "event_count": 5587,
+      "raw_event_count": 8178,
+      "file_path": "logs/Feeding/2026-08-03/claude-code__9e30bbe2-a6fa-400d-80fa-4e2a57ed56ff.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5"
+    },
+    {
+      "session_id": "8fefb5fe-e14f-4feb-b0c6-010542d4876c",
+      "tool": "claude-code",
+      "started_at": "2026-08-03T03:25:47.364Z",
+      "last_event_at": "2026-08-03T08:25:23.549Z",
+      "event_count": 892,
+      "raw_event_count": 1200,
+      "file_path": "logs/Feeding/2026-08-03/claude-code__8fefb5fe-e14f-4feb-b0c6-010542d4876c.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5",
+      "events_since_notice": 0
     }
   ],
-  "updated_at": "2026-07-31T08:20:11.655808+00:00"
+  "updated_at": "2026-08-03T08:25:23.564Z"
 }

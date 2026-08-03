@@ -29,6 +29,7 @@
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
 
+#include "bk7258_rtc.h"
 #include "bk7258_wdt.h"
 #include "bk7258_gpio.h"
 
@@ -138,6 +139,34 @@ void board_late_initialize(void)
 #endif
 
   bk7258_serial_monitor_start();
+
+#ifdef CONFIG_BK7258_RTC
+  /* The AON RTC is brought up here, not in up_rtc_initialize().  It needs a
+   * running system tick to measure its own clock rate against, and the AON
+   * domain must not be poked before it is ready -- the watchdog bricked the
+   * board twice from the top of __start() proving that.  By this point the
+   * console is up and the watchdog has been arming from the same domain for
+   * a while, so the domain is known good.  CONFIG_RTC_EXTERNAL is what lets
+   * the OS wait this long for its clock.
+   */
+
+    {
+      int ret = bk7258_rtc_initialize();
+
+      if (ret < 0)
+        {
+          syslog(LOG_WARNING, "rtc: not available: %d\n", ret);
+        }
+      else
+        {
+          ret = bk7258_rtc_register();
+          if (ret < 0)
+            {
+              syslog(LOG_WARNING, "rtc: not registered: %d\n", ret);
+            }
+        }
+    }
+#endif
 
     {
       /* Force the BLE staging object (and with it the closed-library

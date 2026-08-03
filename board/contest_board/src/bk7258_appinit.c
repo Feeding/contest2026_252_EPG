@@ -50,6 +50,13 @@
 #  include <nuttx/sdio.h>
 #  include <nuttx/mmcsd.h>
 #endif
+#ifdef CONFIG_BK7258_RTC
+#  include <nuttx/timers/rtc.h>
+#  include "bk7258_rtc.h"
+#endif
+#ifdef CONFIG_BK7258_WDT
+#  include "bk7258_wdt.h"
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -78,6 +85,21 @@ int board_app_initialize(uintptr_t arg)
     }
 #endif
 
+#ifdef CONFIG_FS_TMPFS
+  /* A writable scratch filesystem.  Nothing in the demo apps needs one, but
+   * anything that writes a temporary file does: both the xTS scanf case and
+   * the syscall suite fail at the first open() without it, and the SD card
+   * is not a given (it holds the vendor's artwork and may be absent).
+   * RAM-backed keeps it out of the way of both.
+   */
+
+  ret = nx_mount(NULL, "/tmp", "tmpfs", 0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at /tmp: %d\n", ret);
+    }
+#endif
+
 #ifdef CONFIG_USERLED_LOWER
   ret = userled_lower_initialize("/dev/userleds");
   if (ret < 0)
@@ -91,6 +113,39 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: btn_lower_initialize: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_BK7258_RTC
+  /* The counter itself came up in board_late_initialize(); this only
+   * publishes the same lower half as a character device.  If that never
+   * succeeded there is nothing to publish and saying so is more useful
+   * than an empty /dev/rtc0.
+   */
+
+    {
+      FAR struct rtc_lowerhalf_s *rtclower = bk7258_rtc_lowerhalf();
+
+      if (rtclower == NULL)
+        {
+          syslog(LOG_WARNING, "rtc: lower half unavailable, no /dev/rtc0\n");
+        }
+      else
+        {
+          ret = rtc_initialize(0, rtclower);
+          if (ret < 0)
+            {
+              syslog(LOG_ERR, "ERROR: rtc_initialize: %d\n", ret);
+            }
+        }
+    }
+#endif
+
+#ifdef CONFIG_BK7258_WDT
+  ret = bk7258_wdt_lowerhalf_initialize("/dev/watchdog0");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: bk7258_wdt_lowerhalf_initialize: %d\n", ret);
     }
 #endif
 

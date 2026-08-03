@@ -28,10 +28,24 @@
 
 #include <stdint.h>
 
+#include <nuttx/irq.h>
+#include <nuttx/spinlock.h>
+
 #include "arm_internal.h"
 
 #include "bk7258_memorymap.h"
 #include "bk7258_wdt.h"
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+/* Deadline handed over by the /dev/watchdog0 lower half, in system ticks.
+ * Zero means nobody has claimed the dog and the heartbeat just feeds.
+ */
+
+static volatile clock_t g_wdt_deadline;
+static volatile bool    g_wdt_claimed;
 
 /****************************************************************************
  * Public Functions
@@ -75,4 +89,50 @@ void bk7258_wdt_reboot(void)
   bk7258_wdt_arm(BK7258_WDT_PERIOD_BOOT);
 
   for (; ; );
+}
+
+/****************************************************************************
+ * Name: bk7258_wdt_deadline_set
+ ****************************************************************************/
+
+void bk7258_wdt_deadline_set(clock_t deadline)
+{
+  irqstate_t flags;
+
+  flags = enter_critical_section();
+
+  if (deadline == 0)
+    {
+      g_wdt_claimed  = false;
+      g_wdt_deadline = 0;
+    }
+  else
+    {
+      g_wdt_deadline = deadline;
+      g_wdt_claimed  = true;
+    }
+
+  leave_critical_section(flags);
+}
+
+/****************************************************************************
+ * Name: bk7258_wdt_service
+ ****************************************************************************/
+
+void bk7258_wdt_service(void)
+{
+  if (g_wdt_claimed &&
+      (sclock_t)(clock_systime_ticks() - g_wdt_deadline) >= 0)
+    {
+      /* Userspace stopped pinging.  Arming the boot period rather than
+       * merely withholding the feed is what makes the timeout mean what the
+       * caller asked for: the running period is ~65 s, so a silent stop
+       * would defer the reset by up to that long past a 5 s timeout.
+       */
+
+      bk7258_wdt_arm(BK7258_WDT_PERIOD_BOOT);
+      return;
+    }
+
+  bk7258_wdt_arm(BK7258_WDT_PERIOD_RUN);
 }

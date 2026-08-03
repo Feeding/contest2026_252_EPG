@@ -27,6 +27,9 @@
  * Included Files
  ****************************************************************************/
 
+#include <nuttx/config.h>
+#include <nuttx/clock.h>
+
 #include <stdint.h>
 
 /****************************************************************************
@@ -46,6 +49,16 @@
 
 #define BK7258_WDT_PERIOD_RUN    0xfffc  /* Generous heartbeat period */
 #define BK7258_WDT_PERIOD_BOOT   6       /* Immediate reset, bootloader value */
+
+/* How often the SysTick handler services the dog, in ticks.  The arm
+ * sequence crosses onto the slow AON bus, so feeding on every tick cost the
+ * eye animation about a third of its frame budget; decimating by ten made
+ * that back.  This is also the granularity of any deadline built on top of
+ * the heartbeat, which is why the /dev/watchdog0 lower half reads it here
+ * instead of assuming a number.
+ */
+
+#define BK7258_WDT_HEARTBEAT_TICKS 10
 
 /****************************************************************************
  * Public Functions
@@ -73,5 +86,52 @@ void bk7258_wdt_arm(uint32_t period);
  ****************************************************************************/
 
 void bk7258_wdt_reboot(void) noreturn_function;
+
+/****************************************************************************
+ * Name: bk7258_wdt_service
+ *
+ * Description:
+ *   The heartbeat, called from the SysTick handler.  Feeds the dog while
+ *   the system is healthy, and stops feeding -- in fact arms the shortest
+ *   period, so the reset is immediate rather than up to a hardware period
+ *   away -- once a deadline handed over by the /dev/watchdog0 driver has
+ *   passed.
+ *
+ *   With no deadline set this is exactly the original unconditional feed,
+ *   which is the safety net that recovers the board from a wedged handler
+ *   or a spin with interrupts masked.  That net is never removed; the
+ *   userspace watchdog only adds a second, earlier reason to bite.
+ *
+ ****************************************************************************/
+
+void bk7258_wdt_service(void);
+
+/****************************************************************************
+ * Name: bk7258_wdt_deadline_set
+ *
+ * Description:
+ *   Hand the heartbeat a deadline, in system ticks, past which it must stop
+ *   feeding.  Passing zero releases the claim and restores the plain
+ *   always-feed behaviour.  Safe to call from any context.
+ *
+ ****************************************************************************/
+
+void bk7258_wdt_deadline_set(clock_t deadline);
+
+/****************************************************************************
+ * Name: bk7258_wdt_lowerhalf_initialize
+ *
+ * Description:
+ *   Register the AON watchdog with the NuttX watchdog upper half, normally
+ *   as /dev/watchdog0.
+ *
+ * Returned Value:
+ *   Zero on success; a negated errno value on failure.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_BK7258_WDT
+int bk7258_wdt_lowerhalf_initialize(FAR const char *devpath);
+#endif
 
 #endif /* __BOARD_CONTEST_BOARD_CHIP_BK7258_WDT_H */
