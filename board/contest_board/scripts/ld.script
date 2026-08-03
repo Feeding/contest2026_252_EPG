@@ -78,7 +78,7 @@ MEMORY
    * foreign code ran.
    */
 
-  sram  (rwx) : ORIGIN = 0x28020000, LENGTH = 192K
+  sram  (rwx) : ORIGIN = 0x28020000, LENGTH = 256K
 
   /* Top of the camera carve (0x28098000+0x5000 is the YUV line buffer);
    * the remaining 12K hosts SRAM-resident hot code (TJpgDec).
@@ -266,6 +266,21 @@ SECTIONS
      */
 
     PROVIDE(_eram = ORIGIN(sram) + LENGTH(sram));
+
+    /* The serial black box (bk7258_serial.c) needs 31 words that no part of
+     * this image links, heaps or zeroes, so its breadcrumbs survive the
+     * watchdog reset __start() prints them after.  It used to name a fixed
+     * address chosen to sit above the linked region; raising LENGTH(sram)
+     * later swallowed it, and the interrupt handler spent every interrupt
+     * writing tag words over live heap -- the inode tree picked one up as a
+     * peer pointer and "ls /dev" took a bus fault at 0x3300000c.  Anchoring
+     * the reservation to the region instead of to a constant means the next
+     * LENGTH change carries it along.  arm_addregion() starts the upper heap
+     * at _ebbnote for the same reason.
+     */
+
+    PROVIDE(_bbnote  = ORIGIN(sram) + LENGTH(sram));
+    PROVIDE(_ebbnote = ORIGIN(sram) + LENGTH(sram) + 128);
 
     /* up_allocate_heap() hands out (_eram - g_idle_topstack), and that top
      * of stack is _ebss plus a Kconfig constant -- pure arithmetic, which

@@ -266,13 +266,20 @@ static inline void bk7258_serialout(struct bk7258_dev_s *priv,
  *
  * The wedge this port is chasing dies inside this interrupt handler with
  * interrupts masked and nothing dispatched, so nothing can report from the
- * inside.  These notes go to a fixed address in SRAM3 -- outside everything
- * this image links or heaps -- and survive the watchdog reset that follows;
- * __start() prints them on the way back up.  Tags: 0x11 handler entry with
- * int_status, 0x22 rx budget chosen, 0x33 handler exit with round count.
+ * inside.  These notes go just above the linked SRAM region -- outside
+ * everything this image links or heaps -- and survive the watchdog reset
+ * that follows; __start() prints them on the way back up.  Tags: 0x11
+ * handler entry with int_status, 0x22 rx budget chosen, 0x33 handler exit
+ * with round count.
+ *
+ * The address comes from the link script (_bbnote), not from a constant: a
+ * constant picked to clear the region once stopped clearing it when
+ * LENGTH(sram) grew, and the notes landed in live heap.
  */
 
-#define BB_BASE  ((volatile uint32_t *)0x28048000)
+extern uint32_t _bbnote[];
+
+#define BB_BASE  ((volatile uint32_t *)_bbnote)
 
 static inline void bb_note(uint32_t word)
 {

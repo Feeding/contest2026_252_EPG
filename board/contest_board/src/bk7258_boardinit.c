@@ -87,11 +87,13 @@ void board_late_initialize(void)
   bk7258_gpio_write(52, true);
 
 #if CONFIG_MM_REGIONS > 1
-  /* Fold the upper SRAM banks into the heap.  The linked region stops at
-   * 0x28040000 because early boot cannot keep .data/.bss any higher
+  /* Fold the upper SRAM banks into the heap.  The linked region stops well
+   * short of them because early boot cannot keep .data/.bss any higher
    * (measured; see the link script), but at runtime SRAM4/5 have carried
-   * stacks and test patterns through every probe.  0x28040000-0x28050000
-   * stays out: the black-box recorder lives at 0x28048000.
+   * stacks and test patterns through every probe.  This region starts at
+   * _ebbnote rather than at the end of the linked region: the 128 bytes
+   * between them are the serial black box, which has to stay out of every
+   * heap.
    */
 
   /* Top 32 KB (0x28098000+) stays out of the heap: the camera's YUV
@@ -99,7 +101,12 @@ void board_late_initialize(void)
    * (TJpgDec, copied below) at 0x2809d000.
    */
 
-  kumm_addregion((void *)0x28050000, 0x28098000 - 0x28050000);
+    {
+      extern uint32_t _ebbnote[];
+
+      kumm_addregion((void *)_ebbnote,
+                     0x28098000 - (uintptr_t)_ebbnote);
+    }
 
     {
       extern uint8_t _ssramfunc[];
