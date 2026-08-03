@@ -98,6 +98,23 @@ int board_app_initialize(uintptr_t arg)
     {
       syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at /tmp: %d\n", ret);
     }
+
+#ifdef CONFIG_BLUETOOTH_SERVICE
+  /* The Bluetooth service keeps its adapter properties and bond database
+   * under a hard-coded /data/misc/bt (service/common/storage.c), and it
+   * only mkdir()s the last two components -- without /data the create
+   * fails with ENOENT and the daemon carries the failed handle into a
+   * bus fault.  RAM-backed is the honest choice here: bonds do not have
+   * to survive a power cycle for anything this board does yet, and the
+   * SD card is not a given.
+   */
+
+  ret = nx_mount(NULL, "/data", "tmpfs", 0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at /data: %d\n", ret);
+    }
+#endif
 #endif
 
 #ifdef CONFIG_USERLED_LOWER
