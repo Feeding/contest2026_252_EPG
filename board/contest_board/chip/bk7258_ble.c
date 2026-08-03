@@ -8,6 +8,7 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -210,6 +211,19 @@ int bk7258_bt_cal_init(void)
   return bk_cal_if_init();
 }
 
+extern void ble_ps_enable_clear(void);
+
+/* Power save is switched off after controller init (see the call site).
+ * This flag exists so the same image can be measured both ways.
+ */
+
+static bool g_bt_ps_disable = true;
+
+void bk7258_bt_ps_keep(void)
+{
+  g_bt_ps_disable = false;
+}
+
 int bk7258_bt_controller_init(void)
 {
   /* Calibration goes after the controller here, not before it as the
@@ -236,6 +250,29 @@ int bk7258_bt_controller_init(void)
 
       syslog(LOG_INFO, "ble: calibration -> %d%s\n", cal,
              cal == 0 ? "" : " (no factory record; defaults in use)");
+
+      /* Leave controller power save off.
+       *
+       * The controller task runs "if (ble_ps_enabled()) rwip_sleep();"
+       * before every rwip_schedule(), and ble_ps_enable_set() turns that
+       * on at start of day -- it ignores its argument and stores 1.  In
+       * the vendor's own arrangement the UART that carries HCI wakes the
+       * part again; this port carries HCI over a function call, so
+       * nothing does, and a sleeping controller services commands only
+       * when a timer next wakes it.  Measured: with power save on,
+       * HCI_Reset took 2.35 s and each following command exactly 10.000
+       * s, so the Bluetooth service's adapter took 141 s to come up and
+       * its advertising start timed out.  With it off, every one of
+       * those commands completes in under 10 ms.
+       *
+       * The cost is idle current: the radio no longer sleeps between
+       * events.  bk7258_bt_ps_keep() leaves it on for measurement.
+       */
+
+      if (g_bt_ps_disable)
+        {
+          ble_ps_enable_clear();
+        }
     }
 
   return ret;
