@@ -784,6 +784,20 @@ int main(int argc, char *argv[])
 
           printf("face: bt pll -> %d\n", bk7258_ble_use_bt_pll());
         }
+
+      if (stage == 7)
+        {
+          extern int bk7258_bt_cal_init(void);
+
+          printf("face: RF calibration starting before controller...\n");
+          ret = bk7258_bt_cal_init();
+          printf("face: RF calibration -> %d\n", ret);
+          if (ret < 0)
+            {
+              return 1;
+            }
+        }
+
       if (stage < 4)
         {
           return 0;
@@ -830,6 +844,14 @@ bt_staged:
               return g_bt_ctrl_ret == 0 ? 0 : 1;
             }
 
+          if (stage >= 15)
+            {
+              extern void bk7258_bt_rf_diag(void);
+
+              bk7258_bt_rf_diag();
+              return 0;
+            }
+
           if (stage >= 14)
             {
               extern int bk7258_ble_tx_test(int channel, int seconds);
@@ -856,10 +878,7 @@ bt_staged:
 
           if (stage >= 7)
             {
-              extern int bk7258_bt_cal_init(void);
-
-              printf("face: calibrating (known to fault today)...\n");
-              printf("face: cal -> %d\n", bk7258_bt_cal_init());
+              printf("face: RF calibration completed before controller\n");
               return 0;
             }
 
@@ -890,10 +909,10 @@ bt_staged:
 
               bk7258_bt_rf_diag();
               bk7258_ble_txpwr(argc > 3 ? atoi(argv[3]) : -1);
-              int aret = bk7258_ble_adv_start("openvela-EPG");
+              int aret = bk7258_ble_adv_start("EPG-252-2026");
 
               printf("face: advertising -> %d (%s)\n", aret,
-                     aret == 0 ? "ON AIR as openvela-EPG" : "failed");
+                     aret == 0 ? "ON AIR as EPG-252-2026" : "failed");
               return aret == 0 ? 0 : 1;
             }
         }

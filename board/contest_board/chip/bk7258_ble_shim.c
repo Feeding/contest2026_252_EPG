@@ -13,6 +13,7 @@
 #include <nuttx/irq.h>
 #include <nuttx/mutex.h>
 #include <nuttx/kmalloc.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "arm_internal.h"
@@ -61,9 +62,45 @@ int rtos_unlock_mutex(void **mutex)
   return nxmutex_unlock((mutex_t *)*mutex);
 }
 
+int rtos_deinit_mutex(void **mutex)
+{
+  mutex_t *m;
+
+  if (mutex == NULL || *mutex == NULL)
+    {
+      return 0;
+    }
+
+  m = (mutex_t *)*mutex;
+  nxmutex_destroy(m);
+  kmm_free(m);
+  *mutex = NULL;
+  return 0;
+}
+
 void delay_us(uint32_t us)
 {
   up_udelay(us);
+}
+
+void bk_delay_us(uint32_t us)
+{
+  up_udelay(us);
+}
+
+bool ate_is_enabled(void)
+{
+  return false;
+}
+
+void shell_log_flush(void)
+{
+}
+
+void bk_system_dump(const char *func, int line)
+{
+  (void)func;
+  (void)line;
 }
 
 /* Vendor hooks the controller calls directly; nothing to do on NuttX.

@@ -133,7 +133,9 @@ void bk7258_saradc_set_flag(uint8_t flag);
  * are inverted: 0 powers the domain up.  The PHY domain is index 10.
  */
 
+#define PHY_PWR_MODULE_WIFI_MAC     9
 #define PHY_PWR_MODULE_WIFI_PHY     10
+#define PHY_PWR_MODULE_OFDM         13
 #define PHY_PWR_MODULE_LAST         15
 
 /* Sub-domain identifiers are parent * PM_MODULE_SUB_POWER_DOMAIN_MAX + n
@@ -142,6 +144,9 @@ void bk7258_saradc_set_flag(uint8_t flag);
  */
 
 #define PHY_PWR_SUB_DOMAIN_STRIDE   20
+#define PHY_PWR_SUB_MODULE_BT       (PHY_PWR_MODULE_WIFI_PHY * \
+                                     PHY_PWR_SUB_DOMAIN_STRIDE)
+#define PHY_PWR_SUB_MODULE_RF       (PHY_PWR_SUB_MODULE_BT + 2)
 
 #define PHY_PWR_STATE_ON            0
 #define PHY_PWR_STATE_OFF           1
@@ -172,7 +177,13 @@ void bk7258_saradc_set_flag(uint8_t flag);
 #define PHY_ANA_BCAL_START          5, 22, 0x1
 #define PHY_ANA_BCAL_EN             5, 23, 0x1
 #define PHY_ANA_VBIAS               5, 27, 0x1f
+#define PHY_ANA_HPSSREN             3, 8, 0x1
+#define PHY_ANA_ANABUF_SEL_RX       3, 10, 0x1
+#define PHY_ANA_ANABUF_SEL_TX       4, 0, 0x1
 #define PHY_ANA_IOLDO_LP            8, 0, 0x1
+#define PHY_ANA_T_VANALDOSEL        8, 3, 0x7
+#define PHY_ANA_R_VANALDOSEL        8, 6, 0x7
+#define PHY_ANA_ALOPOWERSEL         8, 19, 0x1
 #define PHY_ANA_VIOLDOSEL           8, 12, 0x7
 #define PHY_ANA_IOCURLIM            8, 15, 0x1
 #define PHY_ANA_BGCAL               8, 22, 0x3f
@@ -501,6 +512,8 @@ typedef struct
   uint8_t (*_get_tx_pwr_idx)(void);
   void (*_txpwr_max_set_bt_polar)(void);
   void (*_ble_tx_testmode_retrig)(void);
+  void (*_txpwr_max_set_bt_iq)(void);
+  bool (*_get_ble_polar_mode)(void);
 
   int (*_gpio_dev_map_rxen)(uint32_t gpio_id);
 
@@ -512,6 +525,7 @@ typedef struct
   void (*_sys_ll_set_ana_reg8_violdosel)(uint32_t value);
   void (*_sys_ll_set_ana_reg8_iocurlim)(uint32_t value);
   int (*_bk_feature_phy_log_enable)(void);
+  int (*_bk_feature_wifi_signal_cert_enable)(void);
 } phy_os_funcs_t;
 
 /* Replica of phy_os_variable_t (bk_phy_adapter.h, lines 193..282).  The
@@ -613,6 +627,7 @@ typedef struct
   void (*_sys_drv_set_ana_reg12_dpfms)(uint32_t value);
   bk_err_t (*_bk_pm_module_vote_power_ctrl)(unsigned int module,
                                             uint32_t power_state);
+  void (*_sys_hal_low_analog_set)(uint32_t en);
 } rf_control_funcs_t;
 
 typedef struct
@@ -621,6 +636,8 @@ typedef struct
   uint32_t _pm_power_module_state_on;
   uint32_t _pm_power_module_name_phy;
   uint32_t _pm_power_module_name_rf;
+  uint32_t _pm_power_module_name_mac;
+  uint32_t _pm_power_module_name_ofdm;
 } rf_variable_t;
 
 /* The library hands _rtos_init_timer a pointer to its own beken_timer_t
@@ -657,6 +674,7 @@ struct phy_timer_ctx_s
 extern int  ble_in_dut_mode(void);
 extern uint8_t get_tx_pwr_idx(void);
 extern void txpwr_max_set_bt_polar(void);
+extern void txpwr_max_set_bt_iq(void);
 extern void bluetooth_rf_test_mode_retrig(void);
 
 /* Closed PHY entries.  rwnx_cal_mac_sleep_rc_recover lives in libbk_phy's
@@ -779,6 +797,56 @@ static int phy_power_domain_ctrl(unsigned int module, uint32_t power_state)
 }
 
 /****************************************************************************
+ * Name: bk7258_phy_power_vote
+ *
+ * Description:
+ *   Preserve the SDK power manager's per-client votes for the shared PHY
+ *   domain.  The bluetooth controller holds PHY_BT for its lifetime while
+ *   the RF arbiter pulses PHY_RF around individual radio events.  Folding
+ *   both sub-modules directly onto parent bit 10 lets an RF_CLOSE power the
+ *   domain down underneath the still-running controller.
+ *
+ ****************************************************************************/
+
+int bk7258_phy_power_vote(unsigned int module, uint32_t power_state)
+{
+  static uint32_t votes;
+  irqstate_t flags;
+  uint32_t vote;
+
+  if (module < PHY_PWR_SUB_MODULE_BT || module > PHY_PWR_SUB_MODULE_RF)
+    {
+      return PHY_FAIL;
+    }
+
+  if (power_state == PHY_PWR_STATE_NONE)
+    {
+      return PHY_OK;
+    }
+
+  vote = 1u << (module - PHY_PWR_SUB_MODULE_BT);
+  flags = up_irq_save();
+
+  if (power_state == PHY_PWR_STATE_ON)
+    {
+      votes |= vote;
+      modifyreg32(PHY_SYS_POWER, 1u << PHY_PWR_MODULE_WIFI_PHY, 0);
+    }
+  else
+    {
+      votes &= ~vote;
+      if (votes == 0)
+        {
+          modifyreg32(PHY_SYS_POWER, 0,
+                      1u << PHY_PWR_MODULE_WIFI_PHY);
+        }
+    }
+
+  up_irq_restore(flags);
+  return PHY_OK;
+}
+
+/****************************************************************************
  * Name: phy_modem_clk_ctrl / phy_modem_bus_clk_ctrl
  *
  * Description:
@@ -868,6 +936,23 @@ static uint8_t phy_osi_wifi_media_mode(void)
 static void phy_osi_nv_reg_set_hook(void *hook)
 {
   g_phy_nv_reg_hook = hook;
+}
+
+/* The AVDK implementation of get_info_item() is itself a no-op returning
+ * zero.  libbk_phy still calls the table entry while deciding whether an RF
+ * calibration mode was persisted, even when there is no RF partition.  Keep
+ * the entry callable so that "not present" is reported instead of branching
+ * through a NULL function pointer.
+ */
+
+static UINT32 phy_osi_get_info_item(UINT32 item, UINT8 *ptr0, UINT8 *ptr1,
+                                    UINT8 *ptr2)
+{
+  UNUSED(item);
+  UNUSED(ptr0);
+  UNUSED(ptr1);
+  UNUSED(ptr2);
+  return 0;
 }
 
 /****************************************************************************
@@ -1968,6 +2053,21 @@ static void phy_osi_ble_tx_testmode_retrig(void)
   bluetooth_rf_test_mode_retrig();
 }
 
+static void phy_osi_txpwr_max_set_bt_iq(void)
+{
+  txpwr_max_set_bt_iq();
+}
+
+static bool phy_osi_get_ble_polar_mode(void)
+{
+  return true;
+}
+
+static int phy_osi_wifi_signal_cert_enabled(void)
+{
+  return 0;
+}
+
 /****************************************************************************
  * Name: phy_osi_rf_module_power_ctrl / phy_osi_rf_pm_vote_power
  *
@@ -1990,7 +2090,32 @@ static void phy_osi_rf_module_power_ctrl(unsigned int module,
 static bk_err_t phy_osi_rf_pm_vote_power(unsigned int module,
                                          uint32_t power_state)
 {
-  return phy_power_domain_ctrl(module, power_state);
+  return bk7258_phy_power_vote(module, power_state);
+}
+
+static void phy_osi_rf_low_analog_set(uint32_t enable)
+{
+  phy_ana_field(PHY_ANA_SPI_LATCH1V, 1);
+
+  if (enable)
+    {
+      phy_ana_field(PHY_ANA_T_VANALDOSEL, 0);
+      phy_ana_field(PHY_ANA_R_VANALDOSEL, 0);
+      phy_ana_field(PHY_ANA_ALOPOWERSEL, 1);
+    }
+  else
+    {
+      uint32_t vanaldo = phy_ana_get_field(PHY_ANA_ALDOSEL) ? 5 : 4;
+
+      phy_ana_field(PHY_ANA_T_VANALDOSEL, vanaldo);
+      phy_ana_field(PHY_ANA_R_VANALDOSEL, vanaldo);
+      phy_ana_field(PHY_ANA_ALOPOWERSEL, 0);
+    }
+
+  phy_ana_field(PHY_ANA_SPI_LATCH1V, 0);
+  phy_ana_field(PHY_ANA_HPSSREN, enable ? 0 : 1);
+  phy_ana_field(PHY_ANA_ANABUF_SEL_RX, enable ? 1 : 0);
+  phy_ana_field(PHY_ANA_ANABUF_SEL_TX, enable ? 1 : 0);
 }
 
 /****************************************************************************
@@ -2030,12 +2155,10 @@ phy_os_funcs_t g_phy_os_funcs =
   ._mix_funcs                        = phy_osi_null_reg_api,
   ._bk_misc_get_reset_reason         = phy_osi_get_reset_reason,
 
-  /* Wi-Fi rate-sensitivity and EVM test entries: absent, as the vendor
-   * leaves them with CONFIG_WIFI_ENABLE off.  Verified absent-and-safe
-   * rather than assumed: with --gc-sections applied, the only code left in
-   * the image that reaches any of them is nv_init, and it reaches
-   * _nv_phy_reg_set_hook, which is therefore the one entry here that is
-   * filled in.
+  /* Wi-Fi rate-sensitivity and EVM test entries are absent, as in the vendor
+   * CONFIG_WIFI_ENABLE=n table.  The linked libbk_phy variant nevertheless
+   * reaches the NV hook and get_info_item while running RF calibration, so
+   * those two entries carry their no-Wi-Fi semantics explicitly.
    */
 
   ._rs_init                          = NULL,
@@ -2048,7 +2171,7 @@ phy_os_funcs_t g_phy_os_funcs =
   ._evm_set_ke_evt_mac_bit           = NULL,
   ._tx_evm_set_chan_ctxt_pop         = NULL,
   ._save_info_item                   = NULL,
-  ._get_info_item                    = NULL,
+  ._get_info_item                    = phy_osi_get_info_item,
 
   ._delay                            = phy_osi_delay,
   ._delay_us                         = phy_osi_delay_us,
@@ -2184,6 +2307,8 @@ phy_os_funcs_t g_phy_os_funcs =
   ._get_tx_pwr_idx                   = phy_osi_get_tx_pwr_idx,
   ._txpwr_max_set_bt_polar           = phy_osi_txpwr_max_set_bt_polar,
   ._ble_tx_testmode_retrig           = phy_osi_ble_tx_testmode_retrig,
+  ._txpwr_max_set_bt_iq              = phy_osi_txpwr_max_set_bt_iq,
+  ._get_ble_polar_mode               = phy_osi_get_ble_polar_mode,
 
   ._gpio_dev_map_rxen                = phy_osi_gpio_dev_map_rxen,
 
@@ -2196,6 +2321,8 @@ phy_os_funcs_t g_phy_os_funcs =
   ._sys_ll_set_ana_reg8_violdosel    = phy_osi_set_violdosel,
   ._sys_ll_set_ana_reg8_iocurlim     = phy_osi_set_iocurlim,
   ._bk_feature_phy_log_enable        = phy_osi_phy_log_enabled,
+  ._bk_feature_wifi_signal_cert_enable =
+                                       phy_osi_wifi_signal_cert_enabled,
 };
 
 /* Constants the library reads out of the table instead of compiling in, so
@@ -2296,6 +2423,7 @@ rf_control_funcs_t g_rf_control_funcs =
   ._sys_drv_set_ana_reg11_apfms   = phy_osi_set_apfms,
   ._sys_drv_set_ana_reg12_dpfms   = phy_osi_set_dpfms,
   ._bk_pm_module_vote_power_ctrl  = phy_osi_rf_pm_vote_power,
+  ._sys_hal_low_analog_set        = phy_osi_rf_low_analog_set,
 };
 
 /* Domain identifiers, not flags: 10 is the PHY power domain and 202 is its
@@ -2311,6 +2439,8 @@ rf_variable_t g_rf_variable =
   ._pm_power_module_name_phy  = PHY_PWR_MODULE_WIFI_PHY,
   ._pm_power_module_name_rf   = PHY_PWR_MODULE_WIFI_PHY *
                                 PHY_PWR_SUB_DOMAIN_STRIDE + 2,
+  ._pm_power_module_name_mac  = PHY_PWR_MODULE_WIFI_MAC,
+  ._pm_power_module_name_ofdm = PHY_PWR_MODULE_OFDM,
 };
 
 /****************************************************************************

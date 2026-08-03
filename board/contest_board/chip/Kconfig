@@ -246,3 +246,13 @@ config BK7258_SELFRESET_PROBE
 		off once the question is answered.
 
 endif # ARCH_CHIP_CUSTOM
+
+config BK7258_HCI_TRANSPORT
+	bool "H4 HCI transport character device"
+	default n
+	---help---
+		Register /dev/ttyHCI0, an H4 HCI byte pipe onto the closed BLE
+		controller, so the openvela Bluetooth service (and therefore
+		bttool and the xTS bluetooth cases) can drive this radio the
+		way it drives any other.  The node only carries traffic; the
+		controller is brought up separately.

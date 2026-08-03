@@ -86,4 +86,8 @@ else()
     "set BK_AVDK_ROOT to the bk_avdk_smp checkout")
 endif()
 
+if(CONFIG_BK7258_HCI_TRANSPORT)
+  list(APPEND SRCS bk7258_hci.c)
+endif()
+
 target_sources(arch PRIVATE ${SRCS})

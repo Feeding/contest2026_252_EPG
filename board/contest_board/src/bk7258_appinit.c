@@ -301,5 +301,23 @@ int board_app_initialize(uintptr_t arg)
     }
 #endif
 
+#ifdef CONFIG_BK7258_HCI_TRANSPORT
+    {
+      /* The H4 transport the openvela Bluetooth service expects to
+       * find.  Registering the node costs nothing and touches no
+       * radio: the controller has to be brought up separately, and
+       * traffic only starts when something opens the device.
+       */
+
+      extern int bk7258_hci_register(FAR const char *path);
+
+      ret = bk7258_hci_register(NULL);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: bk7258_hci_register: %d\n", ret);
+        }
+    }
+#endif
+
   return OK;
 }

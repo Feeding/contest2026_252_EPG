@@ -1,10 +1,7 @@
 /****************************************************************************
  * boards/arm/bk7258/contest_board/chip/bk7258_ble.c
  *
- * BLE bring-up staging.  Present stage: a link probe that references the
- * closed-library entry points so the linker extracts the full dependency
- * tree and enumerates every symbol the NuttX side still owes -- the
- * concrete work inventory for the OSI/PHY/PM adaptation.
+ * BK7258 BLE controller, OSI/PHY integration and raw-HCI diagnostics.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -14,7 +11,7 @@
 #include <syslog.h>
 #include <stdio.h>
 
-/* Closed-library entries (bk_idk prebuilt archives, ABI-matched:
+/* Closed-library entries (Beken AVDK prebuilt archives, ABI-matched:
  * armv8-m.main / fpv5-sp-d16 / hard float).
  */
 
@@ -28,6 +25,16 @@ extern int  phy_adapter_init(void *funcs, void *vars);
 extern void rf_adapter_init(const void *funcs, const void *vars);
 extern void calibration_init(void);
 extern void rf_module_vote_ctrl(uint32_t cmd, uint32_t bit);
+
+/* rf_module_vote_ctrl() owns a bitmask, not a reference count.  Never use
+ * RF_BY_BLE_BIT for a board-level hold: the closed controller legitimately
+ * clears that bit during its own RF lifecycle.  RF_BY_BKREG_BIT is the SDK's
+ * dedicated manual/diagnostic hold and therefore remains independent.
+ */
+
+#define BLE_RF_CLOSE                 0u
+#define BLE_RF_OPEN                  1u
+#define BLE_RF_BOARD_HOLD_BIT        (1u << 2)
 
 /* The OSI table (bk7258_bt_osi.c).  Its address is taken, never called:
  * without a reference the whole object -- and every closed PHY symbol its
@@ -61,7 +68,12 @@ struct bt_feature_s
   uint8_t stop_smp_when_pair_err;
   uint8_t enable_smp_sec_req_evt;
   uint8_t support_lpo_rosc;
+  uint8_t rf_mode;
+  uint8_t support_coex_rf_mode_switch;
+  uint8_t support_sleep_phy_switch;
 };
+
+#define BT_RF_MODE_IQ_LOW_PLL 2
 
 static struct bt_feature_s g_bt_feature;
 
@@ -80,6 +92,7 @@ static struct bt_feature_s g_bt_feature;
 int bk7258_bt_feature_init(void)
 {
   memset(&g_bt_feature, 0, sizeof(g_bt_feature));
+  g_bt_feature.rf_mode = BT_RF_MODE_IQ_LOW_PLL;
   return bt_feature_adapter_init(&g_bt_feature);
 }
 
@@ -163,33 +176,67 @@ extern const uint32_t pwr_gain_base_gain_g;
  * Name: bk7258_ble_use_bt_pll
  *
  * Description:
- *   Point the transceiver at bluetooth's own synthesiser instead of the
- *   Wi-Fi one.  rwnx_rfconfig comes up 0x101 here -- PLL and role both
- *   Wi-Fi -- because the archive this port links is the Wi-Fi PHY, and
- *   the controller library in this SDK has no polar mode to fall back
- *   on (ble_enter_polar_mode exists only in the newer AVDK tree).  So
- *   the transmitter reaches for a Wi-Fi PLL that a BLE-only build never
- *   starts, which is the shape of the symptom: the receiver hears the
- *   room, nothing hears the transmitter, and enabling advertising takes
- *   the receiver down with it.
- *
- *   The Wi-Fi stack hands the synthesiser over with this call during
- *   coexistence; with no Wi-Fi here we make the same request directly.
- *   Must run before the controller initialises the transceiver.
+ *   Select the AVDK IQ path driven by the Bluetooth low PLL and load the
+ *   fallback BLE transmit-power table before controller initialisation.
+ *   This matches the standalone receiver configuration already proven on
+ *   this board and does not depend on the Polar demo's Wi-Fi calibration.
  *
  ****************************************************************************/
 
-extern int rwnx_cal_set_rfconfig_BTPLL(void);
+extern void ble_enter_polar_mode(void);
+extern void ble_enter_iq_mode(void);
+extern int manual_cal_load_default_txpwr_polar_tab(uint32_t status);
+extern int manual_cal_load_default_txpwr_tab(uint32_t status);
+extern uint8_t manual_cal_get_ble_pwr_idx(uint8_t channel);
+extern uint8_t gtxpwr_tab_polar_ble[40];
+extern const uint8_t gtxpwr_tab_def_polar_ble[40];
+extern uint8_t gtxpwr_tab_ble[40];
+extern const uint8_t gtxpwr_tab_def_ble[40];
 extern volatile uint16_t rwnx_rfconfig;
+
+static int bk7258_ble_load_default_polar_power(void)
+{
+  int ret = manual_cal_load_default_txpwr_polar_tab(0);
+
+  /* With no RF partition the closed PHY stays in automatic-calibration
+   * mode.  Its loader deliberately refuses to install defaults in that
+   * mode, but automatic TSSI calibration is unavailable in this port.
+   * Use the board's AVDK table as the documented no-partition fallback.
+   */
+
+  if ((gtxpwr_tab_polar_ble[19] & 0x7f) == 0)
+    {
+      memcpy(gtxpwr_tab_polar_ble, gtxpwr_tab_def_polar_ble,
+             sizeof(gtxpwr_tab_polar_ble));
+      syslog(LOG_INFO, "ble: installed AVDK fallback polar power table\n");
+    }
+
+  return ret;
+}
+
+static int bk7258_ble_load_default_iq_power(void)
+{
+  int ret = manual_cal_load_default_txpwr_tab(0);
+
+  if ((gtxpwr_tab_ble[19] & 0x7f) == 0)
+    {
+      memcpy(gtxpwr_tab_ble, gtxpwr_tab_def_ble, sizeof(gtxpwr_tab_ble));
+      syslog(LOG_INFO, "ble: installed AVDK fallback IQ power table\n");
+    }
+
+  return ret;
+}
 
 int bk7258_ble_use_bt_pll(void)
 {
   int ret;
 
   syslog(LOG_INFO, "ble: rfconfig before %04x\n", rwnx_rfconfig);
-  ret = rwnx_cal_set_rfconfig_BTPLL();
-  syslog(LOG_INFO, "ble: set BTPLL -> %d, rfconfig now %04x\n",
-         ret, rwnx_rfconfig);
+  ble_enter_iq_mode();
+  ret = bk7258_ble_load_default_iq_power();
+  syslog(LOG_INFO,
+         "ble: enter IQ/BTPLL mode -> %d, rfconfig now %04x, ch19 %u\n",
+         ret, rwnx_rfconfig, manual_cal_get_ble_pwr_idx(19));
   return ret;
 }
 
@@ -212,30 +259,27 @@ int bk7258_bt_cal_init(void)
 
 int bk7258_bt_controller_init(void)
 {
-  /* Calibration goes after the controller here, not before it as the
-   * vendor sequences it, and the radio is measurably dead the other
-   * way round: calibrate first and a scan hears nothing, calibrate
-   * second and it hears the whole room.  The controller is what
-   * actually powers the transceiver on this port -- BTSP domain, BTDM
-   * and XVR clocks, all through the OSI table -- while calibration
-   * raises the radio through two PHY-table slots whose implementations
-   * here are not doing that job.  Run first, it trims a block that is
-   * not switched on.  Fixing those two slots would restore the vendor
-   * order; until then this order is the one that works.
-   *
-   * The -1 is expected and not fatal: no factory calibration record in
-   * flash, so the closed library falls back to the board default power
-   * tables and still trims the crystal.
+  int ret;
+
+  /* The standalone IQ/BTPLL path is selected before controller start.
+   * Do not call the legacy full Wi-Fi/BT calibration here: its ATE
+   * preparation path assumes SDK boot services this NuttX port
+   * intentionally does not provide.
    */
 
-  int ret = bluetooth_controller_init();
-
+  ret = bluetooth_controller_init();
   if (ret == 0)
     {
-      int cal = bk7258_bt_cal_init();
+      /* Restore the BLE table after the controller's final RF-mode switch
+       * and before the first advertising event asks for an index.
+       */
 
-      syslog(LOG_INFO, "ble: calibration -> %d%s\n", cal,
-             cal == 0 ? "" : " (no factory record; defaults in use)");
+      int load_ret = bk7258_ble_load_default_iq_power();
+
+      syslog(LOG_INFO,
+             "ble: IQ power table reload -> %d, raw %u, ch19 %u\n",
+             load_ret, gtxpwr_tab_ble[19] & 0x7f,
+             manual_cal_get_ble_pwr_idx(19));
     }
 
   return ret;
@@ -251,7 +295,8 @@ int bk7258_bt_controller_init(void)
  ****************************************************************************/
 
 static volatile int g_hci_evt;
-static uint8_t g_hci_status;
+static volatile uint8_t g_hci_status;
+static volatile uint16_t g_hci_opcode;
 
 static volatile int g_adv_reports;
 
@@ -340,9 +385,16 @@ static int ble_hci_evt_cb(uint8_t *buf, uint16_t len)
       len--;
     }
 
-  if (len >= 4 && (e[0] == 0x0e || e[0] == 0x0f))
+  if (len >= 6 && e[0] == 0x0e &&
+      (uint16_t)(e[3] | ((uint16_t)e[4] << 8)) == g_hci_opcode)
     {
-      g_hci_status = (e[0] == 0x0e) ? e[5] : e[2];
+      g_hci_status = e[5];
+      g_hci_evt = 1;
+    }
+  else if (len >= 6 && e[0] == 0x0f &&
+           (uint16_t)(e[4] | ((uint16_t)e[5] << 8)) == g_hci_opcode)
+    {
+      g_hci_status = e[2];
       g_hci_evt = 1;
     }
 
@@ -397,6 +449,7 @@ static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
 
   g_hci_evt = 0;
   g_hci_status = 0xff;
+  g_hci_opcode = opcode;
 
   if (bk_ble_hci_cmd_to_controller(buf, plen + 3) != 0)
     {
@@ -435,7 +488,6 @@ static int hci_cmd(uint16_t opcode, const uint8_t *params, uint8_t plen)
  *
  ****************************************************************************/
 
-extern uint8_t manual_cal_get_ble_pwr_idx(uint8_t channel);
 extern void ble_cal_set_txpwr(uint8_t idx);
 
 int bk7258_ble_txpwr(int idx)
@@ -525,8 +577,16 @@ int bk7258_ble_hci_reset(void)
 int bk7258_ble_adv_stop(void)
 {
   uint8_t off = 0;
+  int ret;
 
-  return hci_cmd(0x200a, &off, 1);
+  ret = hci_cmd(0x200a, &off, 1);
+  if (ret == 0)
+    {
+      rf_module_vote_ctrl(BLE_RF_CLOSE, BLE_RF_BOARD_HOLD_BIT);
+      syslog(LOG_INFO, "ble: board RF hold released\n");
+    }
+
+  return ret;
 }
 
 int bk7258_ble_scan(int seconds)
@@ -587,7 +647,7 @@ int bk7258_ble_scan(int seconds)
  * Name: bk7258_ble_adv_start
  *
  * Description:
- *   Reset, configure a 100 ms connectable advertisement carrying name,
+ *   Configure a 100 ms scannable advertisement carrying name,
  *   and switch the transmitter on.  Returns 0 when the controller
  *   accepted every step.
  *
@@ -599,32 +659,74 @@ int bk7258_ble_adv_start(const char *name)
   {
     0xa0, 0x00,             /* min interval, 160 * 0.625 ms = 100 ms */
     0xa0, 0x00,             /* max interval */
-    0x00,                   /* ADV_IND, connectable undirected */
-    0x01,                   /* own address: random -- see below */
+    0x00,                   /* ADV_IND, connectable/scannable undirected */
+    0x01,                   /* own address: static random */
     0x00,                   /* peer address type */
     0, 0, 0, 0, 0, 0,       /* peer address, unused for undirected */
     0x07,                   /* all three advertising channels */
     0x00                    /* no scan/connect filtering */
   };
 
+  static const uint8_t rnd[6] =
+  {
+    0x01, 0x03, 0x08, 0x26, 0x52, 0xd2
+  };
+
   uint8_t adv_data[32];
-  uint8_t enable = 0x01;
+  uint8_t scan_rsp[32];
+  uint8_t enable = 1;
   size_t nlen = strlen(name);
   int ret;
 
-  if (nlen > 26)
+  /* Reserve ten bytes for a diagnostic manufacturer-data AD structure.
+   * Together with flags and FFF0 this leaves twelve bytes for the complete
+   * local name and fills the legacy 31-byte payload exactly.
+   */
+
+  if (nlen > 12)
     {
-      nlen = 26;
+      nlen = 12;
     }
 
   memset(adv_data, 0, sizeof(adv_data));
+  adv_data[0] = (uint8_t)(19 + nlen); /* significant part length */
   adv_data[1] = 0x02;                 /* flags AD: length */
   adv_data[2] = 0x01;                 /* flags AD: type */
   adv_data[3] = 0x06;                 /* general discoverable, LE only */
-  adv_data[4] = (uint8_t)(nlen + 1);  /* name AD: length */
-  adv_data[5] = 0x09;                 /* name AD: complete local name */
-  memcpy(adv_data + 6, name, nlen);
-  adv_data[0] = (uint8_t)(5 + nlen);  /* significant part length */
+  adv_data[4] = 0x03;                 /* service AD: length */
+  adv_data[5] = 0x03;                 /* complete 16-bit UUID list */
+  adv_data[6] = 0xf0;                 /* contest EPG service 0xfff0 */
+  adv_data[7] = 0xff;
+  adv_data[8] = (uint8_t)(nlen + 1);  /* name AD: length */
+  adv_data[9] = 0x09;                 /* name AD: complete local name */
+  memcpy(adv_data + 10, name, nlen);
+
+  /* Test company ID 0xffff plus ASCII "EPG252".  nRF Connect exposes the
+   * raw manufacturer field even when an OS suppresses the local name, so
+   * this is an unambiguous board marker during bring-up.
+   */
+
+  adv_data[10 + nlen] = 0x09;
+  adv_data[11 + nlen] = 0xff;
+  adv_data[12 + nlen] = 0xff;
+  adv_data[13 + nlen] = 0xff;
+  adv_data[14 + nlen] = 'E';
+  adv_data[15 + nlen] = 'P';
+  adv_data[16 + nlen] = 'G';
+  adv_data[17 + nlen] = '2';
+  adv_data[18 + nlen] = '5';
+  adv_data[19 + nlen] = '2';
+
+  /* Repeat the complete name in the scan response for active scanners that
+   * do not surface it from the primary PDU.  HCI parameter byte zero is the
+   * data length; the following bytes contain the usual AD structure.
+   */
+
+  memset(scan_rsp, 0, sizeof(scan_rsp));
+  scan_rsp[0] = (uint8_t)(nlen + 2);
+  scan_rsp[1] = (uint8_t)(nlen + 1);
+  scan_rsp[2] = 0x09;                 /* complete local name */
+  memcpy(scan_rsp + 3, name, nlen);
 
   ret = hci_register_once();
   syslog(LOG_INFO, "hci: reg callback -> %d\n", ret);
@@ -633,78 +735,55 @@ int bk7258_ble_adv_start(const char *name)
       return -1;
     }
 
-  /* Probe first, and do not stop at the first silence: HCI_Reset is
-   * answered but LE_Set_Advertising_Parameters was not, so the useful
-   * question is which command groups this path answers at all.  A
-   * vendor-info read, an LE buffer read and an LE feature read bracket
-   * the three cases (base band, LE informational, LE control).
-   */
-
-    {
-      extern void bk7258_bt_osi_diag(void);
-
-      bk7258_bt_osi_diag();
-      usleep(500 * 1000);
-      bk7258_bt_osi_diag();
-    }
-
-  syslog(LOG_INFO, "hci: probe read_local_version -> %d\n",
-         hci_cmd(0x1001, NULL, 0));
-  syslog(LOG_INFO, "hci: probe le_read_buffer_size -> %d\n",
-         hci_cmd(0x2002, NULL, 0));
-  syslog(LOG_INFO, "hci: probe le_read_local_features -> %d\n",
-         hci_cmd(0x2003, NULL, 0));
-
   /* Advertise from a static random address, which is what the product
    * firmware for this board does: its source sets own_addr_type to
    * random with the public option commented out beside it.  Nothing
    * here confirms the controller ever adopted a usable public address,
    * and enabling advertising with a declared address type that has no
-   * address behind it is rejected outright -- error 0x12 -- so this
-   * command has to come first.  The top two bits of the last byte mark
-   * the address static random, as the vendor also does.
+   * address behind it is rejected outright -- error 0x12.  The top two
+   * bits of the last byte mark the address static random, as the vendor
+   * also does.
    */
 
+  ret = hci_cmd(0x2005, rnd, sizeof(rnd));
+  if (ret != 0)
     {
-      uint8_t rnd[6] = { 0x26, 0x20, 0x25, 0x8c, 0x47, 0xc8 };
-
-      rnd[5] |= 0xc0;
-      syslog(LOG_INFO, "hci: set_random_addr -> %d\n",
-             hci_cmd(0x2005, rnd, 6));
+      return ret;
     }
 
-  syslog(LOG_INFO, "hci: adv_params -> %d\n",
-         hci_cmd(0x2006, adv_params, sizeof(adv_params)));
-  syslog(LOG_INFO, "hci: adv_data -> %d\n",
-         hci_cmd(0x2008, adv_data, 32));
+  ret = hci_cmd(0x2006, adv_params, sizeof(adv_params));
+  if (ret != 0)
+    {
+      return ret;
+    }
 
-  /* Vote the radio open for bluetooth before keying the transmitter.
-   * The controller is supposed to do this itself through the OSI
-   * table; asking again is idempotent in the arbiter and costs one
-   * call, and the PHY's own "rf off" note during the synthesiser
-   * switch is reason enough not to assume it happened.
+  ret = hci_cmd(0x2008, adv_data, sizeof(adv_data));
+  if (ret != 0)
+    {
+      return ret;
+    }
+
+  ret = hci_cmd(0x2009, scan_rsp, sizeof(scan_rsp));
+  if (ret != 0)
+    {
+      return ret;
+    }
+
+  /* Hold the radio with the SDK's independent BKREG/manual vote before
+   * keying the transmitter.  Reusing RF_BY_BLE_BIT here is not a second
+   * reference: the arbiter stores a bitmask, so the controller's later
+   * RF_CLOSE clears that shared bit and leaves HCI advertising enabled with
+   * no carrier.  This board hold intentionally trades low-power operation
+   * for stable discoverability; bk7258_ble_adv_stop() releases it.
    */
 
-  rf_module_vote_ctrl(1, 1u << 1);        /* RF_OPEN, RF_BY_BLE_BIT */
-  syslog(LOG_INFO, "ble: rf vote open issued\n");
+  rf_module_vote_ctrl(BLE_RF_OPEN, BLE_RF_BOARD_HOLD_BIT);
+  syslog(LOG_INFO, "ble: board RF hold acquired\n");
 
   ret = hci_cmd(0x200a, &enable, 1);
-  syslog(LOG_INFO, "hci: adv_enable -> %d\n", ret);
-
+  if (ret != 0)
     {
-      /* Sample the interrupt counter only now: before the transmitter
-       * is enabled the link layer has nothing to schedule, so a zero
-       * reading earlier said nothing.  A count that climbs here is the
-       * radio actually running advertising events.
-       */
-
-      extern void bk7258_bt_osi_diag(void);
-
-      bk7258_bt_osi_diag();
-      sleep(2);
-      bk7258_bt_osi_diag();
-      sleep(2);
-      bk7258_bt_osi_diag();
+      rf_module_vote_ctrl(BLE_RF_CLOSE, BLE_RF_BOARD_HOLD_BIT);
     }
 
   return ret;

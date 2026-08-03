@@ -173,12 +173,15 @@ SECTIONS
         _sdata = ABSOLUTE(.);
         *(.data .data.*)
 
-        /* Closed BLE controller/PHY private data: folding it in here
-         * puts it inside the [_sdata,_edata) boot copy, so it is
-         * initialized like any other data.
+        /* Closed BLE controller/PHY private data: folding it in here puts it
+         * inside the [_sdata,_edata) boot copy.  The BK7258 Bluetooth hardware
+         * addresses its exchange-memory descriptors relative to ex_mem, and
+         * the vendor linker contract requires this section to be 32-byte
+         * aligned.
          */
 
-        *(.bt_spec_data*)
+        . = ALIGN(32);
+        KEEP(*(.bt_spec_data*))
         *(.dtcm_sec_data*)
         *(.gnu.linkonce.d.*)
         CONSTRUCTORS
