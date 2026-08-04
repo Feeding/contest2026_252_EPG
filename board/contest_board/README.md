@@ -113,6 +113,25 @@ macOS（Apple Silicon）可用仓库根的封装脚本：
 
 产物在 `cmake_out/contest2026_252_board_nsh/`：`nuttx`（ELF）、`nuttx.bin`。
 
+### 两个配置
+
+| 配置 | 用途 | flash 占用 |
+| --- | --- | --- |
+| `configs/nsh` | 产品镜像：显示管线、摄像头、音频、BLE，外加轻量必测项（`/etc` ROMFS、`md5_test`、BCH、复位原因） | 1652520 B / 93.4% |
+| `configs/xts` | 验证镜像：官方 xTS「通用自测用例」全套 + C++（libcxx）；剥掉闭源 BLE 栈与 eyes/face/snap 腾空间 | 1262392 B / 71.3% |
+
+app 分区只有 1728 KB，两者塞进同一个镜像会溢出到 102%。跑必测用 `xts`，
+跑完把 `nsh` 烧回去——官方流程本来就是"验证构建 ≠ 出货镜像"。
+
+```bash
+./build-macos.sh vendor/openvela/boards/contest2026_252_board/configs/xts
+```
+
+> **加了新 CONFIG 就必须先删构建目录**（`rm -rf cmake_out/<board>_<cfg>`）。
+> cmake 只在初次配置时把 defconfig 展开成 `.config`，之后的 `olddefconfig`
+> 拿的是已有 `.config`，新增行会被静默忽略且构建照样成功。`--cmake distclean`
+> 对此无效，它会直接提示让你删目录。
+
 编译后镜像布局（已验证）：
 
 ```

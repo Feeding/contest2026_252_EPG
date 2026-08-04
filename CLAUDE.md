@@ -144,9 +144,40 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
 ## 七、与官方指南的已知差距
 
-1. **定时器用的是 `arch_timer`（SysTick），不是官方优先推荐的 `arch_alarm`。** 全仓无 `up_alarm_set_lowerhalf` / oneshot lower-half，tickless 未开。官方理由是 oneshot 模型免去重装计数器的累计误差、精度更高。
+1. ~~**定时器用的是 `arch_timer`（SysTick）**~~ —— **此条已过时**。时基早已换成官方推荐的 `arch_alarm`：AON RTC 的 TICK 比较单元backing oneshot lower-half，`chip/bk7258_timerisr.c:146` 调 `up_alarm_set_lowerhalf()`，`.config` 里 `CONFIG_ALARM_ARCH=y` / `CONFIG_ONESHOT=y` 而 `CONFIG_ARMV8M_SYSTICK` 未设（见 PORTING_NOTES 十四章）。**仍然为真的部分**：tickless 未开（`CONFIG_SCHED_TICKLESS` is not set）。
+
+   另有一条**新差距**：xTS 用例 1.3.13 要求 arch alarm 方案暴露 `/dev/oneshot0` 供 `cmocka_driver_oneshot` 驱动，本仓没注册。原因是 AON RTC 只有两个硬件比较单元，`TICK` 已给系统时基、`UPPER` 已给 `/dev/rtc0` 闹钟（`chip/bk7258_rtc.h:64-65`），第三路得另起片内通用 TIMER 外设——那是个新驱动，尚未做。
 2. **`board_app_finalinitialize` 未实现**（`CONFIG_BOARDCTL_FINALINIT` 未开）。目前没有需要它的场景，新增应用级收尾初始化时再补。
-3. **xTS 精简集未跑。** 官方把「通用自测用例」列为**必测**（内存、调度、GPIO、I2C/SPI、UART、RTC、Watchdog）。本仓用的是自建真机验证矩阵（PORTING_NOTES 第十章）。其中 RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章），但**跑的是自建用例，不是 xTS 精简集本身**。
+3. **xTS 精简集：已上板跑过，14 项通过、3 项缺陷、3 项跑不了。** 官方把「通用自测用例」列为**必测**。配置层面按清单逐条补齐见 PORTING_NOTES 十六章，**真机执行记录见十七章**。
+
+   **通过**：内存、调度、ostest、getprime、mm、scanftest、helloxx、popen、pipe、md5、cxxtest、fstest、ramtest、RTC（3/3）、crypto（8/8）。
+
+   **1.3.15 看门狗已修复并全部通过**（十八章）。接上了 BK7258 的 NMI 看门狗阶段：`0x44800000` 那块抬 NMI 异常、比 AON 块先咬，ISR 里记录 `RESET_SOURCE_WATCHDOG` 再 panic，AON 块随后复位。`cmocka_driver_watchdog -r 3` 四子测试全 PASSED，含 `WDIOC_CAPTURE`。开关是 `CONFIG_BK7258_WDT_NMI`，关掉即回到旧行为。
+
+   **两条纪律**：NMI 块在外设域，`0x44800000` 未上电时访问会挂总线，初始化顺序（先开 `0x44010030` bit31 时钟、再旁路门控、最后才写周期）不能乱；周期单位是 2 kHz，来自厂商 `CONFIG_INT_WDT_PERIOD_MS=8000` 与 `wdt_ll_set_period()` 的 ×2 换算，改周期前先看十八章。
+
+   **1.3.5 块设备在真卡上已跑通**（`cmocka_driver_block -m /dev/mmcsd0`，3/3 PASSED，耗时约 2 小时）。**⚠️ 此前报过的"块设备压测打死板子"是误判，已撤回**（详见 PORTING_NOTES 十七章缺陷二）。`cmocka_driver_block` 是 NSH **前台任务**，运行期间 NSH 本来就不回显，而该测试循环里一个字也不打印——"发命令没回显"被误当成"系统死了"。后台重跑 889 秒，`ps` 显示任务始终 `Ready`（不是 `Waiting`），NSH 全程响应，板子没重启；前台被动重跑 601 秒同样正常。这个测试在 120 MB 卡上要跑 233472 次迭代，**推算数小时**，等 300 秒就下结论是不够的。
+
+   **1.3.16 RNG 的两道坎，都已查清**：
+   - **打包**：`apps/testing/drivers/nist-sts` 的解压目录名与自身 CMakeLists 的 glob 不符，且 `PATCH_COMMAND` 的 `-d` 深了一级。修法见 `board/contest_board/tools/fix_nist_sts.sh`，全部动作在 gitignored 下载目录内，**不动公共仓**。fresh checkout 后要重跑一次。
+   - **流上限**：`_POSIX_STREAM_MAX` 在 `nuttx/include/limits.h:131` 硬编码 16 且**无 Kconfig**，每任务最多 13 个可用 FILE 流（`fdtest` 实测：裸 `open()` 到 40 无碍，`fopen()` 卡在 13）。NIST 套件要 30+，**全量跑不可能**。这不是板级问题，值得上游报。
+   - **绕法**：测试选择那步答 `0` 不全选，用 15 位位串每轮选 ≤5 个测试，分三批跑。**15 项全部产出结果且全部达标**（含 NonOverlappingTemplate 的 148 个子项与 RandomExcursions(+Variant) 的 26 行，零个不达标标记）。
+   - **每次重烧镜像后**必须重建 `/tmp/experiments/AlgorithmTesting/<15 个测试名>`——tmpfs 会被清空，否则报 "Could not open freq file"，看着像别的问题。
+
+   **纪律**：判"卡死"之前先确认有没有观察通道。长任务丢后台（`&`）留出 shell，`ps` 一眼分清 `Ready`（在跑）和 `Waiting`（真卡住）。另外 DTR/RTS 无响应不能当死机证据——本板 CEN 没接 CH340 控制线，它**永远**无效（README 8.2）。
+
+   **控制台 Ctrl-C 目前不可用**：`CONFIG_TTY_SIGINT` / `CONFIG_SIG_DEFAULT` 已加进两个 defconfig 且 `.config` 生效，但真机上仍不能中断前台任务（192 秒的 `ostest` 连测两次都没收回）。代码侧 ISIG、TIOCSCTTY/TIOCNOTTY、SIGINT 默认动作逐环节看都对，未查的是 0x03 有没有被 ICANON 行缓冲吃掉。所以**跑长任务前请先用 `&` 丢后台**，别指望 Ctrl-C 能救。详见 PORTING_NOTES 十七章。
+   - ⚠️ **该压测是破坏性的**：`SECTORS_RANGE 0.95`，对整卡 95% 扇区写随机数据。它擦掉过一次原厂表情素材。跑任何带 stress 的用例前先读源码、先备份目标盘。
+
+   **两个配置，别混用**：
+   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因）。flash 93.4%。
+   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app 腾空间。flash 71.3%。跑完必测把 `nsh` 烧回去。
+
+   两者装不进同一个镜像：全塞进 `nsh` 会溢出到 102%。
+
+   **已知补不上的三项**（原因见 PORTING_NOTES 十六章末）：1.3.16 RNG（**已跑通，但只能分批**）、1.3.13 Timer（AON RTC 两个比较单元都已占用，`/dev/oneshot0` 需另起片内 TIMER 驱动）、1.3.5 的片内 flash MTD（用 SD 卡 `/dev/mmcsd0` 可代跑块设备用例，片内 flash 仍无驱动）。
+
+   RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章）。注意 1.3.15 看门狗用例还要求**咬狗后复位原因报 `BOARDIOC_RESETCAUSE_SYS_RWDT`**，`src/bk7258_reset.c` 已实现读回路径，但该映射**未上板验证**。
 
    RTC 有两条限制要知道：计数器不跨复位，墙钟时间掉电或重启即丢（`havesettime()` 如实返回 false）；AON 计数率是启动时实测判定的（这块板子是 32000 Hz 内部 ROSC，不是 32768 晶振），改动 `bk7258_rtc.c` 时别把它换成编译期常量。
 4. **中断绑定只用 `irq_attach`。** 官方指南第二章的 `irq_attach_thread` / `irq_attach_wqueue` 一处都没用（两者在本仓 NuttX 里是可用的）。BLE/BT 那三条是**刻意**如此——对齐厂商 `bk_int_isr_register` → `NVIC_EnableIRQ` 的语义，链路层 ISR 本来就该在中断上下文，会阻塞的定时器回调已经走 HPWORK 了（PORTING_NOTES 十三章）。别顺手改成工作队列。

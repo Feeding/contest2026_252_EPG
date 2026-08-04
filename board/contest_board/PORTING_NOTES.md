@@ -1024,3 +1024,616 @@ AVRCP/AVCTP + BT log 后降到 +60 KB。IDLE 栈从 74648 降到 16384（实测�
 H4 拆帧、跨次写入重组、接收环、read/poll 全部属于 BTH4，不要自己重写一遍
 ——本移植早期版本重写过，行为一致但每换一个上层协议栈就要重新验证一次。
 `head_reserve = 1` 让 H4 类型字节原地回填，不用拷贝。
+
+## 十六、对着官方必测清单补缺口：/etc、复位原因、以及一个装不下的镜像
+
+前一章把中断子系统对着官方指南过了一遍。这一章换个对象：**官方《新平台
+适配指南》第五节把 xTS「通用自测用例」列为必测**，本章记录逐条核对的结果
+和补上的东西。核对方式是机械的——把
+`docs/zh-cn/test_dev_guide/openvela_xts_test_cases.md` 第一章里出现的所有
+`CONFIG_*` 抽出来（68 项），和构建产物的 `.config` 做 diff，而不是读文档
+凭印象判断。
+
+### 文档里的符号名有三分之一在本树不存在
+
+diff 出来的第一批"缺失"其实是**命名漂移**，照抄会写出永远不生效的行：
+
+| xTS 文档写的 | 本树实际 | 结论 |
+| --- | --- | --- |
+| `CONFIG_CMOCKA` | `CONFIG_TESTING_CMOCKA` | 早已开启 |
+| `CONFIG_PSEUDOFS_SOFTLINKS` | `CONFIG_FS_LINKS` | 早已开启 |
+| `CONFIG_TESTS_TESTCASES` / `CONFIG_FS_TEST` | 不存在 | 见下 md5 |
+| `CONFIG_TESTING_CRYPTO_3DES_XTS` | `CONFIG_TESTING_CRYPTO_AES_XTS` | 名字不同 |
+| `CONFIG_DRIVERS_RTC` | 不存在 | defconfig 里的死行，已删 |
+
+**教训**：跨仓抄配置项前先 `grep '^config X$' nuttx apps` 确认符号存在，
+否则就是给自己埋一颗"写了但不生效"的雷。本仓 defconfig 里就躺着三颗：
+`CONFIG_DRIVERS_RTC`（本树无此符号）、`CONFIG_PSEUDOFS_SOFTLINKS`（名字
+不对）、`CONFIG_ARMV8M_SYSTICK`（`depends on TIMER`，而 `TIMER` 没开——
+时基十四章起就换成 AON RTC 的 `arch_alarm` 了，这行是换过去时的残留）。
+三行都静默无效，构建照样成功。
+
+### `/etc` 根本不存在
+
+官方指南第三节板级层清单里有一项 **ETCROMFS**，本仓从来没做。
+`CONFIG_FS_ROMFS is not set`，`/etc` 不存在，而用例 1.1.12 要
+`md5_test -f /etc/1.txt -c 100`。
+
+补法照 `vendor/sifli` 的 SF32LB52（本树里最接近的参照）：`src/etc/` 放
+`1.txt`、`group`、`init.d/rcS`、`init.d/rc.sysinit`，`src/CMakeLists.txt`
+里 `nuttx_add_romfs()` 烘成镜像，`sched/init/nx_bringup.c` 在 init 任务
+起来之前自动挂载——板级不用写挂载代码。产出的 `romfs.img` 是 1024 字节，
+`strings` 能看到四个文件都在。
+
+两个坑：`RCSRCS` 列出的文件**会过预处理器**，所以 `rcS` / `rc.sysinit`
+里不能写 `#` 注释（sifli 的这两个文件是空的，不是偷懒）；`RCRAWS` 才是
+原样拷贝。
+
+`md5_test` 本身也得自带——文档要的 `CONFIG_TESTS_TESTCASES` / `FS_TEST`
+在本树不存在，sifli 的做法是板级提供一个 `md5_test.c`，本仓照办
+（`src/md5_test.c`，`CONFIG_CRYPTO` 提供 `md5init/md5update/md5final`）。
+
+### 复位原因：从厂商 SDK 反查出寄存器
+
+用例 1.3.15 除了咬狗，还要求 `boardctl(BOARDIOC_RESET_CAUSE)` 回报
+`BOARDIOC_RESETCAUSE_SYS_RWDT`。本仓此前只有 `board_reset()`，没有
+`board_reset_cause()`。
+
+寄存器不靠猜。`bk7258.defconfig` 第 2 行写着 `CONFIG_SOC_BK7236XX=y`
+——**BK7258 属 BK7236XX 家族，不是 BK7256XX**，这一步定错整章就废。据此
+`middleware/driver/reset_reason/reset_reason.c` 走的是这个分支：
+
+```
+读:  aon_pmu_ll_get_r7a() >> 24 & 0x7f
+写:  R0 的 [30:24] 读改写，再往 R25 依次写 0x424B55AA、0xBDB4AA55
+```
+
+R25 那对魔数是厂商的锁存序列（注释原文 "pass PMU_REG0 value to
+PMU_REG7B"），不写的话 R0 的值撑不过复位。地址由
+`include/soc/bk7258/reg_base.h:54` 的 `0x44000000` 加
+`aon_pmu_ll.h` 里的偏移算出：R0=`0x44000000`、R25=`0x44000094`、
+R7A=`0x440001E8`，都在 AON 域——这正是它能跨复位存活的原因。
+
+**什么时候能碰**：不能在 `__start()` 里。AON 域没就绪就访问会挂总线，
+第二章那两次砖机就是这么来的。所以锁存这一步放在 `board_late_initialize()`，
+和 AON RTC 同一个位置，那里域已被证明可用。
+
+`board_reset()` 现在会先写 `RESET_SOURCE_REBOOT` 再咬狗，好让下次启动
+分得清"我自己要重启"和"看门狗自己咬的"。
+
+**这一章的验证边界**：以上全是构建级取证（符号进镜像、`.config` 取值、
+`romfs.img` 内容）。`board_reset_cause()` 的映射**没有上板验证**——尤其
+"看门狗咬后 R7A 里是不是真的是 0x02"这一条，SDK 的 BK7236XX 分支并没有
+对看门狗做特殊处理，只是原样读回软件上次写的值，所以**咬狗场景是否真能
+报出 RWDT，必须真机复验**。另外 `board_reset()` 现在多了一次 AON PMU
+写，而 `reboot` 是本仓的烧录入口——万一它出问题，退路是按 RST 键，
+`bk_flash.py` 本来就不设超时（README 8.2）。
+
+### 一个装不下的镜像，和为什么要拆配置
+
+把整套必测配置加进 `configs/nsh` 之后，链接直接失败：
+
+```
+flash: 1806084 B / 1728 KB = 102.07%
+```
+
+`nsh` 是产品镜像，闭源 BLE 栈 + 显示管线已经吃掉 92%，塞不下 NIST STS
+和 crypto 测试套件。硬塞的话只能砍产品功能，那是本末倒置。
+
+拆成两个配置：
+
+| 配置 | 用途 | flash |
+| --- | --- | --- |
+| `configs/nsh` | 产品镜像。轻量必测项：`/etc`、md5、BCH、复位原因 | 1652520 B / 93.4% |
+| `configs/xts` | 验证镜像。全套必测 + C++；剥掉 BLE 栈与三个演示 app | 1262392 B / 71.3% |
+
+官方流程本来就是这样——xTS 跑的是验证构建，不是出货镜像。跑完再把
+`nsh` 烧回去。
+
+拆配置时踩到的：`configs/xts` 是从 `nsh` 过滤蓝牙相关行生成的，结果把
+`CONFIG_TLS_NELEM` / `CONFIG_TLS_TASK_NELEM` 一起滤掉了，而 `LIBCXX`
+`depends on TLS_NELEM > 0`，libcxx 的 `thread.cpp` 还要 `task_tls_*`。
+连着两轮链接失败才补回来。
+
+### C++ 与 crypto 的两个非显性依赖
+
+- `CONFIG_HAVE_CXX=y` **只是声明工具链会编 C++**，标准库是另一个 choice，
+  默认 `LIBCXXNONE`。`cxxtest` 要 `<map>/<vector>/<fstream>`，得开
+  `CONFIG_LIBCXX` + `CONFIG_LIBCXXABI`（两者都已 vendored 在
+  `nuttx/libs/libxx/` 下，能离线编）。第一轮报的是 `fatal error: map:
+  No such file or directory`。
+- crypto 套件链接时报 `undefined reference to curve25519_generate_public`。
+  根因在 `nuttx/crypto/CMakeLists.txt:61-63`：`curve25519.c` 被放在
+  `if(CONFIG_CRYPTO_RANDOM_POOL)` 分支里，而 `cryptosoft.c` 的 DH 路径
+  无条件引用它。所以 `CRYPTO_RANDOM_POOL` 在这里不是可选项。
+
+### 没补上的三项，以及为什么
+
+1. **1.3.16 RNG（nist_sts）**——`apps/testing/drivers/nist-sts` 不自带
+   源码，configure 时从 csrc.nist.gov 下 `sts-2_1_2.zip`。本树这条流程
+   是坏的：压缩包解出来叫 `sts-2.1.2`，而 CMakeLists glob 的是
+   `sts/src/*.c`，一个源文件都找不到，于是 builtin 表里留下无法解析的
+   `nist_sts_main`；两个随附补丁还有一个被拒（留下 `Oops.rej`）。修它要
+   动 `apps/`，违反公共仓零改动。`/dev/urandom` 本身是在的，缺的只是
+   NIST 那套统计工具。本地要跑的话在 gitignored 的下载目录里补个软链
+   `ln -s sts-2.1.2 .../nist-sts/nist-sts/sts` 即可，但那不会跟着仓库走，
+   所以没设成默认。
+2. **1.3.13 Timer（`/dev/oneshot0`）**——用例要求 arch alarm 方案把
+   oneshot 暴露成设备节点。AON RTC 只有两个硬件比较单元，`TICK` 给了
+   系统时基、`UPPER` 给了 `/dev/rtc0` 闹钟（`bk7258_rtc.h:64-65`），
+   没有第三路。把系统时基那一路直接注册成 `/dev/oneshot0` 会让测试程序
+   抢走调度时钟，所以只能另起片内通用 TIMER 外设——新驱动，未做。
+   `cmocka_driver_oneshot` 这个命令**在镜像里，但没有设备可开**。
+3. **片内 flash MTD（1.3.5 的本意）**——`CONFIG_BCH` 已开，
+   `cmocka_driver_block` 也在，拿 SD 卡的 `/dev/mmcsd0` 可以跑通块设备
+   用例，但**片内 8MB flash 仍然没有驱动**。这块同时卡着 BLE 的出厂
+   标定数据读取（十三章余量第 3 条）。难点是 flash 控制器 XIP 时的 CRC
+   编码（34:32），MTD 要在这层之上还是之下要先想清楚。
+
+## 十七、xTS 必测集真机跑通记：两个新缺陷，和一张被自己测试擦掉的卡
+
+上一章把配置补齐了，本章是**真机执行**的记录。镜像用 `configs/xts`，
+全部结论来自 `/dev/cu.usbserial-310` 上的实际输出。
+
+### 通过的
+
+| 用例 | 结果 |
+| --- | --- |
+| 1.3.5 块设备（真卡） | 3/3，耗时约 2 小时 |
+| 1.1.1 内存管理 | 8/8 |
+| 1.1.2 调度 | 16/16 |
+| 1.1.4 ostest | `Exiting with status 0` |
+| 1.1.5 getprime | 1230 个素数 / 4765 ms |
+| 1.1.6 mm | TEST COMPLETE |
+| 1.1.7 scanftest | OK 164 / FAILED 0 |
+| 1.1.9 helloxx | 静态/栈/动态三种构造 |
+| 1.1.10 popen、1.1.11 pipe | 含重定向 |
+| 1.1.12 md5 | 100 次一致，且与主机 `md5` 逐字节吻合 |
+| 1.1.13 cxxtest | vector/string/map/C++17 |
+| 1.3.2 fstest | OK 200 / FAILED 0 |
+| 1.3.3 ramtest | 六种图案全过 |
+| 1.3.12 RTC | 3/3，含 alarm 与 periodic 回调 |
+| 1.3.17 crypto | **8/8** |
+
+上一章新加的三样东西在真机上都立住了：`/etc` ROMFS 挂载正确、`md5_test`
+哈希与主机一致、libcxx 工具链跑通。
+
+`reboot` 路径也顺带验证了：第二次烧录是在**含 `bk7258_reset_reason_set()`
+的镜像**上用 `--reboot` 完成的，探测数 3340 与改动前的 3339 基本一致——
+`board_reset()` 里新增的那次 AON PMU 写没有破坏重启。
+
+### 缺陷一：复位原因报不出 RWDT（本章最重要的结论）
+
+四次看门狗运行（`-r 0/1/2/3`）的全部失败收敛到同一处：
+
+```
+drivertest_watchdog.c:377   1 != 2
+drivertest_watchdog.c:422   1 != 2
+drivertest_watchdog.c:460   1 != 2
+```
+
+实际 `1 = SYS_CHIPPOR`，期望 `2 = SYS_RWDT`。feeding / interrupts / loop
+三个子测试本身都通过，只有复位原因这一项挂。
+
+**根因**：上一章从厂商 SDK 抄来的那套读写序列是对的，但它维护的字段
+**纯靠软件写入**——`reset_reason_init()` 读完就写回 POWERON，硬件在
+看门狗咬下去时不会往里写任何东西。所以咬狗后读到的永远是上次软件写的值。
+这正是上一章末尾标注"必须真机复验"的那一条，**结论是证伪**。
+
+**修法**（未做）：BK7258 有 NMI 看门狗阶段——`CONFIG_NMI_WDT_EN`、
+`sys_hal_nmi_wdt_set_clk_div()`，见 `bk_idk/middleware/driver/wdt/wdt_driver.c:120`
+与 `middleware/soc/bk7258/hal/wdt_ll.h:52`。咬狗前先进一次中断。官方用例
+的注记恰好也要求这个："芯片厂商初始化 wdt 时需要在 wdt 中断里面主动调用
+panic，并且提高 watchdog 中断优先级"。接上这一级同时解决两件事：ISR 里写
+`RESET_SOURCE_WATCHDOG` 让下次启动报对，以及 panic + 堆栈转储。
+
+动它要小心：看门狗同时是 `reboot` 和烧录窗口的入口。
+
+### 缺陷二（**已撤回**）：块设备压测并没有把板子打死
+
+**这一条是误判，后来推翻了。原始记录保留在下面，因为翻车过程本身比结论
+有价值。**
+
+当时的观察：`cmocka_driver_block -m /dev/mmcsd0` 在第一个子测试
+`drivertest_block_stress` 之后串口再无任何输出，DTR/RTS 切换零响应，
+只能人手按 RST。据此判定"卡死且看门狗没救回来"。
+
+**三条推翻的证据**：
+
+1. **后台重跑，889 秒全程 `Ready`。** 把同一条命令加 `&` 丢到后台，NSH
+   就空出来了。`ps` 每 25 秒采样一次，任务始终是 `Ready`（可运行、在被
+   调度），不是 `Waiting Semaphore`；栈高水位稳定在 1268~1328 字节；
+   NSH 全程响应；板子没有重启过。**它一直在正常干活。**
+2. **前台被动重跑，1501 秒无异常。** 不发任何命令、只被动读串口，跑满
+   25 分钟窗口仍在正常运行——没有卡死，没有重启，也没有任何输出（该测试
+   循环里本来就不打印）。
+3. **两次都远超当初判定的 300 秒。**
+4. **最终它自己跑完了，而且全过。** 让它在真卡上不受干扰地跑到底，约
+   **2 小时**后打出：
+
+   ```
+   [       OK ] drivertest_block_stress
+   [       OK ] drivertest_block_single_write
+   [       OK ] drivertest_block_cache_write
+   [  PASSED  ] 3 test(s).
+   ```
+
+   日志尾部还能看到一小时前发的 `echo alive` 排在队里、测试一结束就执行了
+   ——**NSH 全程只是被前台任务阻塞，从来没死过**。
+
+**根因是我读错了现象**：`cmocka_driver_block` 是 NSH **前台任务**，它运行
+期间 NSH 本来就不回显；而这个测试在循环里一个字也不打印。于是"发命令没
+回显"被我当成了"系统死了"。至于 DTR/RTS 零响应——README 8.2 早就写明本板
+CEN 没接到 CH340 控制线，**那本来就永远无效**，拿它当死机佐证是循环论证。
+
+**看门狗"没救回来"同样是误判**：系统健康、tick 正常、狗被正常喂着，
+不咬才是对的。这里没有需要救的东西。
+
+**这个测试到底要跑多久**：12 MB ramdisk 跑 23347 次迭代用了 465 秒
+（约 50 次/秒）；SD 卡是 233472 次迭代还要走真实 I/O，实测 889 秒内前沿
+连扇区 15000 都没到，推算全程**数小时**。等 300 秒就下结论，等于在一场
+四小时的长跑第五分钟宣布选手猝死。
+
+**教训一**：判断"卡死"之前先确认自己有没有观察通道。把长任务丢后台、留出
+一个能敲命令的 shell，`ps` 一眼就能分清"Ready 在跑"和"Waiting 卡住"——
+这个动作成本几乎为零，却能省掉一整条错误的排查链（我为此写了 ramdisk 隔离、
+读了三层驱动的等待路径、还擦了一次卡）。
+
+**教训二**：别拿恒为真的条件当证据。当时我把"DTR/RTS 切换零响应"也算作
+死机佐证，可 README 8.2 早就写明本板 CEN 没接到 CH340 控制线，**它永远
+无效**。用一个永真命题去支持结论，是循环论证。
+
+**一个想补但没补成的洞**：控制台上 Ctrl-C 不能中断前台任务，跑飞的任务
+只能等它跑完或按 RST——这正是把上面那次误判的代价放大的原因之一。
+
+两个 defconfig 加了 `CONFIG_SIG_DEFAULT=y` + `CONFIG_TTY_SIGINT=y`
+（`CONFIG_SIG_SIGKILL_ACTION` 默认就是 y），构建通过、`.config` 确认生效、
+镜像也烧上了板——**但真机上 Ctrl-C 依然不中断**。拿 192 秒的 `ostest` 连测
+两次，两次 shell 都没收回。
+
+代码侧逐环节都查过，看起来都对：
+
+- `uart_register()` 对控制台无条件置 `ISIG | ECHO | ICANON`（serial.c:2102）
+- NSH 前台执行前发 `TIOCSCTTY` 注册 pid、结束后发 `TIOCNOTTY` 释放
+  （nsh_builtin.c:151/216），两个 ioctl 驱动里都实现了（serial.c:1700/1716）
+- `INVALID_PROCESS_ID` 是 -1，首次注册不会被 `dev->pid >= 0` 挡掉
+- SIGINT 的默认动作 `nxsig_abnormal_termination` 由
+  `CONFIG_SIG_SIGKILL_ACTION` 开启，已开
+
+**还没查的**：0x03 这个字节到底有没有走到 `uart_check_signo()`——ICANON
+行缓冲有没有先把它吃掉，以及 `dev->pid` 运行时的实际取值。要往下查得在板上
+插桩（那几个文件都在公共仓，不能改，只能从板级绕）。
+
+**记这一条的教训**：`.config` 里有值 ≠ 功能能用。我一度就是看构建通过加
+配置项生效就宣布"补上了"，这跟本章开头那次误判是同一种错——用间接证据
+代替真机验证。
+
+**排查过程留档**（结论虽然作废，路径本身可复用）：
+
+| 实验 | 迭代数 | 耗时 | 结果 |
+| --- | --- | --- | --- |
+| ramdisk 512 KB（`mkrd`） | 972 | < 120 秒 | 通过 |
+| ramdisk 12 MB | 23347 | 465 秒 | 通过 |
+| 真卡高位扇区单扇区读写（主机驱动 `dd`） | 800 次传输 | 243 秒 | 通过 |
+| 真卡后台跑压测 | —— | 889 秒 | **不是卡死，一直 Ready** |
+
+顺带确认了几件事，都成立：`bk7258_sdio.c` 的四个等待循环全部有
+`POLL_BUDGET = 2000000` 保护，无无界等待；`mmcsd_transferready()` 被
+`TICK_PER_SEC` 界住；bch 层七处 `nxmutex_lock` 都是规整配对；块设备按路径
+`open()` 走 `fs_blockproxy.c` → `bchdev_register()`，`dd` 和测试走的是同
+一条路。**这一层没有已知缺陷。**
+
+### 缺陷三（自伤）：那个测试是破坏性的，卡被擦了
+
+`drivertest_block_stress` 的写法是：
+
+```c
+nsectors = pre->cfg.geo_nsectors * SECTORS_RANGE;   /* SECTORS_RANGE 0.95 */
+for (i = 0; i < nsectors; i++) { lseek; 写随机; fsync; lseek; 读回; crc32 比对; }
+```
+
+它对整卡 95% 的扇区逐个写随机数据。跑了约 300 秒才卡死，事后取证：
+扇区 0 是随机 ASCII、`mount -t vfat` 返回 EINVAL、偏移 1MB/10MB/100MB
+采样全是随机数据。**原厂表情素材被擦掉了**，而 `bk7258_backup/` 里只有
+flash 备份，没有卡的镜像。
+
+**教训**：xTS 里带 "stress" 字样的用例要先读源码确认它写什么设备。
+官方文档只说"在测试平台 /dev 下找到 Flash 对应的设备名称"，没有一个字
+提到它是破坏性的。跑之前先备份目标盘，或者拿一张空卡。
+
+### 灌回素材：贴片卡只能走串口
+
+SD NAND 是贴片的（SDIO 走 GPIO14-19），拔不下来用读卡器，只能从控制台灌。
+给 `configs/nsh` 加了 `CONFIG_SYSTEM_YMODEM`（+10.5 KB，加完 93.99%，
+刚好装下），顺带补上了此前没跑的 xTS 1.3.11（Uart 文件传输）。
+
+三个必须踩准的细节：
+
+1. **`CONFIG_FAT_LFN is not set`**，NuttX 这边只认 8.3 大写短名。face 应用
+   待机时开的是 `/mnt/GENIE_~1.AVI`——那是原厂用支持长名的系统写入
+   `genie_eye.avi` 后生成的短名。灌回去必须直接叫 `GENIE_~1.AVI`。
+2. **lrzsz 的 `lsz` 在 macOS 上驱不动 `/dev/cu.*`**。`lsz ... < 口 > 口`
+   会把设备开两次；改成共享 fd（`exec 3<>口`）仍然在收到接收端第一个
+   `C` 之后挂住。最后自己用 pyserial 写了个 Ymodem-1K 发送端
+   （`scratchpad/ysend.py`），一个句柄、可控重试。
+3. **启动 `rb` 和发送必须在同一个进程里**。分两个进程时，接收端的第一个
+   `C` 正好落在关口/开口的缝里被吃掉，发送端永远等不到。
+
+实测速率 8.6 KB/s（115200 下理论上限 11.5 KB/s 的 75%，Ymodem 停等 ACK
+加 SD 写入的开销），9.1 MB 约 18 分钟。没有去调高控制台波特率——UART
+分频万一在高速下不准会把控制台一起丢，那要重新烧录才能救。
+
+**结果**：10 个文件全部灌回，板上 `ls -l /mnt` 的大小与主机暂存逐字节一致，
+再用板上的 `md5_test`（就是上一章为 xTS 1.1.12 加的那个）逐个复算，
+**10 个哈希与主机 `md5` 全部吻合**。`face` 应用起来后正常进入 idle 循环，
+无任何文件打开失败。卡从 120 MB 空盘变为已用 9360 KB。
+
+顺带一提，这次校验本身就是 `/etc` + `md5_test` 那套工作的意外回报——
+补 xTS 用例时顺手做的工具，成了灌数据后唯一能在板上做端到端验证的手段。
+
+### 仍然跑不了的三项
+
+- **1.3.6 GPIO**：用例要 `cmocka_driver_gpio -a /dev/gpio0 -b /dev/gpio1`
+  两个节点用杜邦线短接，板上只注册了 `gpio0`。
+- **1.3.7 I2C/SPI**：用例走 uORB + BMI160 传感器，板上没有。
+- **1.3.16 RNG**：打包问题已解决，但卡在第二道坎上。
+
+  **第一道（已解决）**：`apps/testing/drivers/nist-sts` 不自带源码，configure
+  时从 NIST 下载，然后两处对不上——压缩包解出来叫 `sts-2.1.2` 而它自己的
+  CMakeLists glob 的是 `sts/src/*.c`；`PATCH_COMMAND` 用
+  `patch -p0 -d <dir>/nist-sts`，而补丁里的路径以 `nist-sts/sts/` 开头，
+  **`-d` 深了一级**，两个补丁全被拒（留下 `Oops.rej`）。两者叠加的结果是
+  一个源文件都找不到，**构建照样成功**，只在最后链接时炸出未解析的
+  `nist_sts_main`。
+
+  修法写成了 `tools/fix_nist_sts.sh`：把解出的目录改名成 `sts`，再用
+  `-p2` 应用两个补丁。全部动作发生在该包 `.gitignore` 排除的下载目录内，
+  **不改任何公共仓的跟踪文件**。改完链接通过、`nist_sts` 进 builtin 表、
+  交互菜单跑得起来。fresh checkout 后要重跑一次这个脚本。
+
+  **第二道（未解决）**：套件要同时为 15 个测试各开 `stats.txt` 和
+  `results.txt`，加上 summary、freq.txt 和输入文件，超过 30 个流。实测在
+  **第 11 个日志文件**上 `fopen` 返回 NULL，套件报
+  "LOG FILES COULD NOT BE OPENED / MAX # OF OPENED FILES HAS BEEN REACHED = 11"
+  ——那条消息还带一句 "-OR- THE OUTPUT DIRECTORY DOES NOT EXIST"，容易误导，
+  但目录确实都在（前 6 个测试的日志文件已经建出来了）。
+
+  已排除的：15 个目录名与源码 `testNames[]` 逐字一致；把
+  `CONFIG_NFILE_DESCRIPTORS_PER_BLOCK` 从 8 抬到 64 后**仍然停在 11**，
+  所以不是 fd 表大小；`CONFIG_LIBC_OPEN_MAX` 是 256。改到 FAT 上跑更早就挂
+  （`CONFIG_FAT_LFN` 没开，`AlgorithmTesting` 超出 8.3），那条路不通。
+
+  **第二道也查清了。** 写了 `src/fdtest.c`（xts 镜像里的 `fdtest` 命令），
+  把两个池子分开测，一次就定死了：
+
+  ```
+  open()   held  40 simultaneously (无失败)
+  fopen()  held  13 simultaneously, then failed with errno 24 (EMFILE)
+  -> FILE streams run out first (13 vs 40 descriptors)
+  ```
+
+  裸描述符开到 40 毫无压力，FILE 流卡在 13。所以我一开始拧
+  `NFILE_DESCRIPTORS_PER_BLOCK` 是拧错了旋钮——那管的是描述符表。
+
+  根因在 `nuttx/libs/libc/stdio/lib_fopen.c:94`：
+
+  ```c
+  if (list->sl_count >= _POSIX_STREAM_MAX) { set_errno(EMFILE); return NULL; }
+  ```
+
+  而 `_POSIX_STREAM_MAX` 是 `nuttx/include/limits.h:131` 里**硬编码的 16，
+  没有任何 Kconfig**。减去 stdin/stdout/stderr 正好 13，与实测分毫不差。
+
+  **这不是板级问题**，任何 openvela 板子都一样：NIST 套件要同时开 30+ 个流
+  （15 个测试各 2 个日志 + summary + freq + 输入文件），在这棵树上全量跑
+  不可能。官方却把它列为必测——值得往上游报。
+
+  **绕过办法：分批跑。** 日志额度是 10 个流 = 每轮 5 个测试。在
+  `nist_sts` 的测试选择那一步答 `0`（不全选），再输入 15 位的位串。
+  三批实测结果（判据 P-Value > 0.0001，比例及格线 8/10）：
+
+  | 测试 | P-VALUE | 比例 |
+  | --- | --- | --- |
+  | Frequency | 0.739918 | 10/10 |
+  | BlockFrequency | 0.534146 | 10/10 |
+  | CumulativeSums | 0.739918 / 0.122325 | 10/10 |
+  | Runs | 0.534146 | 10/10 |
+  | LongestRun | 0.066881 | 10/10 |
+  | Rank | 0.534146 | 10/10 |
+  | FFT | 0.122325 | 10/10 |
+  | OverlappingTemplate | 0.008878 | 10/10 |
+  | Universal | 0.534146 | 10/10 |
+  | ApproximateEntropy | 0.534146 | 10/10 |
+  | Serial | 0.035173 / 0.534146 | 10/10 |
+  | LinearComplexity | 0.739918 | 9/10 |
+
+  **15 项全部产出结果且全部达标**，最低的 0.008878 仍高出判据近两个数量级，
+  比例最低 9/10 也高于及格线 8。**`/dev/urandom` 的均匀性与独立性达标。**
+
+  分批用的位串（测试选择那步答 `0` 之后输入）：
+
+  ```
+  111110000000000   Frequency BlockFrequency CumulativeSums Runs LongestRun
+  000001101100000   Rank FFT OverlappingTemplate Universal
+  000000000010011   ApproximateEntropy Serial LinearComplexity
+  ```
+
+  **另外 3 项一度跑不了，后来查清并解决了两件事。**
+
+  症状：NonOverlappingTemplate（148 个模板）、RandomExcursions（8 个状态）、
+  RandomExcursionsVariant（18 个状态）都在报告生成阶段停在
+  **`data12.txt` -- file not found**，`finalAnalysisReport.txt` 留空。
+
+  **不是"必须同时打开"**。`partitionResultFile()`（`src/assess.c:120`）本来
+  就是"开一批 → 写 → 关一批"，作者早就避免了一次开 148 个：
+
+  ```c
+  m = numOfFiles/20;                                  /* 分成 m 批 */
+  for (k=0; k<m; k++) {
+      for (i=start; i<=end; i++) fp[i] = fopen(s[i], "a");   /* 开一批 */
+      ...写...
+      for (i=start; i<=end; i++) fclose(fp[i]);              /* 关一批 */
+  }
+  ```
+
+  问题只是**批大小硬编码 20**，而此处可用额度是 11（16 减去 stdin/stdout/
+  stderr、summary、results.txt）——所以第 12 个必挂，编号严丝合缝。
+  `fix_nist_sts.sh` 里把这四个字面量改成 8，三个测试的 `dataN.txt` 立刻
+  全部生成。
+
+  **NonOverlappingTemplate 还缺一份输入**。改完批大小后它跑完了，但 148 行
+  全是 `0.000000 / 0/10 / *`。根因在
+  `src/nonOverlappingTemplateMatchings.c:41`：
+
+  ```c
+  sprintf(directory, "templates/template%d", m);      /* 相对当前目录 */
+  ```
+
+  那是 NIST 发行包 `templates/` 下的文件（`template9`，2664 字节，正好
+  148 行模板），不随测试代码走。板上工作目录没有它，测试读不到模板就产出
+  一堆零——**看着像随机数不合格，其实是缺输入**。
+
+  解法：把它烘进 `/etc` ROMFS（`src/etc/templates/template9`，走的是
+  `/etc/1.txt` 那套现成机制，镜像只大 3 KB），跑之前拷到工作目录：
+
+  ```
+  mkdir -p /tmp/templates
+  cp /etc/templates/template9 /tmp/templates/template9
+  ```
+
+  补上之后：**148 行，129 项 10/10、19 项 9/10，零个 `*` 标记，全部达标**。
+
+  **RandomExcursions 与 Variant：我先后给出过两个错误解释，实际是我的
+  测试方法有 bug，这两项本来就是通过的。**
+
+  它俩的 `stats.txt` / `results.txt` 一直是空的。我先说是"流上限"，
+  后说是"循环数不足、样本不适用"——**两个都错**，而且第二个是从空输出
+  倒推出来的，没有任何直接证据。
+
+  真因：`fixParameters()` 只在选了**参数化测试**（BlockFrequency、
+  NonOverlapping、Overlapping、ApEn、Serial、LinearComplexity）时才弹参数
+  调整菜单。RandomExcursions 和 Variant 都不是，所以那一步不出现——而我的
+  自动化脚本不管选了什么都照发同一串 7 个输入，多出来的那个 `0` 被下一个
+  提示 "How many bitstreams?" 吃掉，**比特流数变成 0**，测试循环一次都没
+  执行。文件当然是空的，而 "Statistical Testing Complete" 照样打印。
+
+  去掉多余那一步重跑，立刻正常：
+
+  ```
+  (a) Number Of Cycles (J) = 1833
+  (b) Sequence Length (n)  = 400000
+  (c) Rejection Constraint = 500.000000
+  SUCCESS    x = -4 chi^2 = 3.826565 p_value = 0.574647
+  ... 8 个状态全部 SUCCESS
+  ```
+
+  **J = 1833，是门槛 500 的三倍多**——样本一直是够的，我那句"典型只有约
+  316 个循环"是凭空估的，跟实测差了近 6 倍。
+
+  汇总报告：RandomExcursions 8 行、RandomExcursionsVariant 18 行，
+  **全部 7/7，零个 `*` 标记**。P-VALUE 列显示 `----` 是因为有效序列数
+  （7）不足 10，STS 此时跳过均匀性卡方、只报通过比例；报告结尾那句
+  "with the exception of the random excursion (variant) test" 说的就是
+  这两项用不同的判定口径。10 条序列里有 3 条因循环数不足被逐条丢弃——
+  **"不适用"是按序列判的，不是整个样本不合格**。
+
+  **教训**：自动化交互式程序时，输入序列不能写死——菜单是条件出现的。
+  更要紧的是，**不要从"输出是空的"去反推原因**。空输出的成因太多，我两次
+  都在没有证据的情况下编了一个听起来合理的机制，第二次还写进了文档。
+
+  **一个每次都要记得的操作**：`/tmp` 是 tmpfs，**重烧镜像后那 15 个
+  `experiments/AlgorithmTesting/<测试名>` 目录全没了**，跑之前必须重建，
+  否则套件会报 "Could not open freq file"，看着像别的问题。
+
+## 十八、NMI 看门狗阶段：让复位原因说真话，顺带换来 capture
+
+十七章留下的唯一功能缺陷是复位原因报不出 `SYS_RWDT`。根因当时已经查清——
+AON PMU 那个字段纯靠软件维护，硬件咬狗时不写。本章记录把 BK7258 的 NMI
+看门狗阶段接上，让"咬狗"这件事有一个能执行代码的时刻。
+
+### 这颗芯片有两个看门狗，不是一个
+
+`wdt_hal.c` 里 `wdt_hal_close_unused()` 把它们当作互斥的两选一，但那是厂商
+的策略，不是硬件约束。两块可以同时跑：
+
+| 块 | 地址 | 行为 | 本仓用途 |
+| --- | --- | --- | --- |
+| AON_WDT | `0x44000600` | 直接复位芯片 | 死机兜底 + `reboot`/烧录入口 |
+| NMI_WDT | `0x44800000` | 抬 NMI 异常 | 先咬一口，留出记录和 dump 的时间 |
+
+`wdt_hal_init()` 在 `CONFIG_SOC_BK7236XX`（BK7258 属于这一族）且
+`CONFIG_NMI_WDT_EN=y` 时选的是 `NMI_WDT_ID`——也就是说**厂商自己的默认就是
+NMI 那块**，本仓此前只用了 AON 那块。
+
+寄存器布局（`wdt_struct.h`）：`+0x08` 是 global_ctrl，bit1 旁路时钟门控；
+`+0x10` 是 ctrl，低 16 位周期、[23:16] 密钥，和 AON 块同样的
+`0x5A` 解锁 / `0xA5` 提交双写。
+
+### 计数率不是猜的
+
+周期单位是这一章唯一需要外部依据的量。厂商 `bk7258.defconfig` 写
+`CONFIG_INT_WDT_PERIOD_MS=8000`，而 `wdt_ll_set_period()` 在时钟分频为 /16
+（`bk_wdt_driver_init()` 里 `NMI_WDT_CLK_DIV_16` 程的值）时把毫秒数乘 2。
+两者合起来：周期寄存器 16000 ↔ 8000 ms，**即 2 kHz**，0xffff 上限约 32.8 秒。
+
+这条很重要:心跳是 100 ms 一次,周期若真是 26MHz/16 那一档,0xfffc 只有
+40 ms,一上电就会陷入 panic 循环。正常周期取 8 s——比心跳宽 80 倍,又远短于
+AON 块的 ~65 s,所以 NMI 永远是先咬的那个。
+
+### 时钟必须先开,否则又是一块砖
+
+`bk7258_wdt_arm()` 里那段注释记着:第一版曾照 bootloader 同时写
+`0x44800010`,放在 `__start()` 顶部,板子直接砖成全无输出——未上电的 APB 块
+被访问会挂总线。所以本章的 init 有严格顺序:
+
+1. `0x44010030 |= 1<<31` 打开 WDG_CPU 设备时钟(该寄存器 audio/pwm 已在用,
+   地址是验证过的;bit31 来自 `CLK_PWR_ID_WDG_CPU` 在厂商枚举里的位置)
+2. `0x44800008 |= 1<<1` 旁路块内时钟门控
+3. `irq_attach(NVIC_IRQ_NMI, ...)`
+4. 才允许写 `0x44800010`
+
+整个初始化放在 `board_late_initialize()`,和 AON RTC、复位原因锁存同一处。
+`g_nmi_wdt_live` 这个标志确保在此之前任何 `bk7258_nmi_wdt_arm()` 都是空操作。
+
+### 真机验证
+
+| 现象 | 证据 |
+| --- | --- |
+| NMI 真的来自 NMI | `xPSR: 68000002`,低 9 位 = 异常号 2 |
+| **关中断也能打进来** | `BASEPRI: 00000080` 的那次 dump——正是官方注记要求的"打断 critical_section" |
+| 咬狗前能打堆栈 | `Assertion failed panic: at bk7258_wdt.c:198`,完整寄存器+双栈转储 |
+| 复位原因报对了 | `-r 1/2/3` 的 RWDT 断言全部通过(改动前是 `1 != 2`,四次运行全挂) |
+| 静置无误触发 | 烧录后静置 30 秒零输出 |
+
+`cmocka_driver_watchdog -r 3` **四个子测试全部 PASSED**;`-r 0`/`-r 1`/`-r 2`
+按官方要求的顺序各跑一遍,**零断言失败**(每轮都以设计中的那次咬狗结束)。
+
+### 顺手拿到的 capture
+
+`-r 3` 里 `drivertest_watchdog_api` 还要 `WDIOC_CAPTURE`——咬狗前回调。
+下半部此前 `.capture = NULL`,注释写的是"AON 块直接复位、没有可挂钩的时刻,
+承诺回调就是撒谎"。那句话在 NMI 阶段出现之后不再成立:NMI 就是那个时刻。
+
+语义是**回调替代复位**:装了 handler 就在 NMI 里喂回两块狗再调用它,系统继续
+跑;没装才走记录原因 + panic 的老路。
+
+### 为什么不让 panic 自己复位
+
+`CONFIG_BOARD_RESET_ON_ASSERT` 默认 0,assert 不复位。这里刻意保持:
+让 AON 块在 dump 之后咬下去。走 `board_reset()` 会把复位原因写成 REBOOT,
+把刚记录的 WATCHDOG 覆盖掉——那样复位原因又会说谎,只是换了个谎。
+NMI 处理里把 AON 周期重设为 `BK7258_WDT_PERIOD_DUMP`(5000,约 5 秒),
+既够 115200 上打完 dump,又不至于让板子悬着。
+
+### 边界
+
+- **`-r 0` 已验证**(按 RST 后补跑)。它要求起始复位原因是 `SYS_CHIPPOR`,
+  也就是上一次必须是上电或按键复位;经 `--reboot` 烧录后拿到的是 `CORE_SOFT`
+  ——这本身是对的,那次确实是软件重启,所以要按一次 RST 才满足前置条件。
+  按 RST 后 `-r 0` 零断言失败,喂狗循环跑完、停喂、NMI 咬下(`xPSR` 低 9 位
+  = 2),板子复位;接着 `-r 1` 同样零失败。**官方要求的 `-r 0→1→2→3` 全序列
+  按顺序跑通。**
+- **capture 回调跑在 NMI 上下文**,在调度器所有锁之外。测试里的回调 `sem_post`
+  是能用的,但这不是一个可以放任意代码的地方。
+- 2 kHz 这个数是从厂商配置推出来的,不是示波器实测。8 秒周期的实际时长没有
+  精确计时过——只验证了"静置 30 秒不误触发"和"停喂后约 100 ms 内咬"。
