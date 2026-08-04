@@ -69,6 +69,14 @@ CONFIG_INIT_STACKSIZE=4096
 CONFIG_LIBC_PERROR_STDOUT=y
 CONFIG_LIBC_STRERROR=y
 CONFIG_MAX_TASKS=16
+# NuttX defaults NAME_MAX to 32, which is shorter than the filenames the xTS
+# syscall cases build from their own function names -- e.g.
+# "test_nuttx_syscall_write03_file.wav" is 35.  open() then fails and the
+# case reports "fd > 0" or "open test file fail", which reads like a
+# filesystem fault and is really a name-length limit.  Four cases in 1.1.3
+# were failing on nothing else; the passing ones are all <= 32.  Other boards
+# in this tree use 48-96.
+CONFIG_NAME_MAX=64
 CONFIG_NSH_ARCHINIT=y
 CONFIG_NSH_BUILTIN_APPS=y
 CONFIG_NSH_FILEIOSIZE=512

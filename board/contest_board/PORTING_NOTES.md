@@ -1182,7 +1182,12 @@ flash: 1806084 B / 1728 KB = 102.07%
 | 1.3.5 块设备（真卡） | 3/3，耗时约 2 小时 |
 | 1.1.1 内存管理 | 8/8 |
 | 1.1.2 调度 | 16/16 |
+| 1.1.3 系统调用 | 81 通过 / 2 失败（仅 socket，见下）|
 | 1.1.4 ostest | `Exiting with status 0` |
+| 1.1.8 hello | `Hello, World!!` |
+| 1.1.10 popen、1.3.4 RAM 随机 | 3/3（ramdisk）|
+| 1.3.10 UART | `cmocka_driver_uart` 1/1 |
+| 2.1.4 Reboot 启动时间 | 7.5 秒到 NSH，启动日志零 error |
 | 1.1.5 getprime | 1230 个素数 / 4765 ms |
 | 1.1.6 mm | TEST COMPLETE |
 | 1.1.7 scanftest | OK 164 / FAILED 0 |
@@ -1194,6 +1199,42 @@ flash: 1806084 B / 1728 KB = 102.07%
 | 1.3.3 ramtest | 六种图案全过 |
 | 1.3.12 RTC | 3/3，含 alarm 与 periodic 回调 |
 | 1.3.17 crypto | **8/8** |
+
+### 1.1.3 那 8 个失败，7 个是同一个原因
+
+第一轮 75 通过 / 8 失败。其中 `sockettest01/02` 好定性——`socket()` 返回
+EINVAL 而非期望的 EAFNOSUPPORT，因为没有 TCP/IP 栈，是 Wi-Fi 那座山的一部分。
+
+剩下 `close03`/`fpathconf01`/`truncate01`/`write03`/`symlink01`/`symlink02`
+一度查不出，报的都是 `fd > 0` 或 `ERROR: open test file fail`，**看着像文件
+系统坏了**。我先排除了两个假设：CWD 不可写（框架自己会 `chdir` 到
+`/tmp/<testdir>`，切过去重跑结果一样）、tmpfs 不支持 truncate（手工
+`truncate -s 4` 把文件从 11 字节截到 4 字节，正常）。方向都不对。
+
+**线索在 `write_test.c`**：三个测试用**完全相同**的
+`open(filename, O_RDWR | O_CREAT, 0700)`，却只有 write03 失败。唯一差别是
+文件名多了 `.wav` 四个字符。这些名字都是拿 `__func__` 拼出来的：
+
+| 测试 | 文件名 | 长度 | 结果 |
+| --- | --- | --- | --- |
+| write01 | `test_nuttx_syscall_write01_file` | 31 | 通过 |
+| close01 | `test_nuttx_syscall_close01_dir` | 30 | 通过 |
+| close03 | `test_nuttx_syscall_close03_dir100` | **33** | 失败 |
+| truncate01 | `test_nuttx_syscall_truncate01_file` | **34** | 失败 |
+| write03 | `test_nuttx_syscall_write03_file.wav` | **35** | 失败 |
+| fpathconf01 | `test_nuttx_syscall_fpathconf01_file` | **35** | 失败 |
+
+**通过的全部 ≤32，失败的全部 >32，零例外** —— 而 `CONFIG_NAME_MAX` 是 NuttX
+的默认值 32。上板实测钉死这个边界：32 字符的文件建得出来，33 字符的
+**静默失败**，连文件都不落地，`echo x > 长名字` 在 NSH 里连报错都没有。
+
+改成 `CONFIG_NAME_MAX=64`（树内其它板子用 48/64/96，抬这个值是常规做法），
+镜像只大 72 字节。重跑：**通过 75 → 81，失败 8 → 2**，这四项连同
+`symlink01/02` 一起转通过。
+
+**教训**：一个报“打不开文件”的失败，未必和文件系统有关。这次能找到全靠
+`write01`/`write03` 在同一个文件里、用同一段代码、只差四个字符——**天然
+对照组比任何推理都值钱**，下次遇到"部分用例失败"先去找这种组。
 
 上一章新加的三样东西在真机上都立住了：`/etc` ROMFS 挂载正确、`md5_test`
 哈希与主机一致、libcxx 工具链跑通。

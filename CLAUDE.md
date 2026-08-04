@@ -153,6 +153,8 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    **通过**：内存、调度、ostest、getprime、mm、scanftest、helloxx、popen、pipe、md5、cxxtest、fstest、ramtest、RTC（3/3）、crypto（8/8）。
 
+   **`CONFIG_NAME_MAX` 必须 >32**（本仓设 64）。xTS 的 syscall 用例拿 `__func__` 拼文件名，最长 35 字符；NuttX 默认 32 会让 `open()` **静默失败**，用例报 `fd > 0` / `open test file fail`，看着像文件系统坏了。1.1.3 曾因此 8 项失败，改完只剩 2 项（socket，需 TCP/IP 栈）。
+
    **1.3.15 看门狗已修复并全部通过**（十八章）。接上了 BK7258 的 NMI 看门狗阶段：`0x44800000` 那块抬 NMI 异常、比 AON 块先咬，ISR 里记录 `RESET_SOURCE_WATCHDOG` 再 panic，AON 块随后复位。`cmocka_driver_watchdog -r 3` 四子测试全 PASSED，含 `WDIOC_CAPTURE`。开关是 `CONFIG_BK7258_WDT_NMI`，关掉即回到旧行为。
 
    **两条纪律**：NMI 块在外设域，`0x44800000` 未上电时访问会挂总线，初始化顺序（先开 `0x44010030` bit31 时钟、再旁路门控、最后才写周期）不能乱；周期单位是 2 kHz，来自厂商 `CONFIG_INT_WDT_PERIOD_MS=8000` 与 `wdt_ll_set_period()` 的 ×2 换算，改周期前先看十八章。
