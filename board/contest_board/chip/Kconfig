@@ -64,6 +64,26 @@ config BK7258_UART2
 	---help---
 		UART2 on GPIO40 (RX) / GPIO41 (TX), alternate GPIO30/GPIO31.
 
+config BK7258_TIMER
+	bool "Oneshot timer (TIMER group 0)"
+	default n
+	select ONESHOT
+	select ONESHOT_COUNT
+	---help---
+		The timer group at 0x44810000, published as /dev/oneshot0.  Two of
+		its three channels are used: one is armed per request, the other
+		free runs as the timebase that ONESHOT_CURRENT reports.  Both sit
+		behind interrupt 3.
+
+		This does not touch the system tick.  The scheduler runs off the
+		AON RTC through arch_alarm(), and /dev/rtc0 owns that block's
+		alarm, so a test can hammer the oneshot without perturbing either.
+
+		The driver implements the count-based half of the oneshot
+		interface, hence the ONESHOT_COUNT select -- the two halves are
+		different function signatures behind the same struct, so the
+		symbol is a build requirement rather than a preference.
+
 config BK7258_RTC
 	bool "AON RTC"
 	default n

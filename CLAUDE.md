@@ -173,12 +173,16 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
    - ⚠️ **该压测是破坏性的**：`SECTORS_RANGE 0.95`，对整卡 95% 扇区写随机数据。它擦掉过一次原厂表情素材。跑任何带 stress 的用例前先读源码、先备份目标盘。
 
    **两个配置，别混用**：
-   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因）。flash 93.4%。
-   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app 腾空间。flash 71.3%。跑完必测把 `nsh` 烧回去。
+   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因、`/dev/oneshot0`）。flash 95.16%。
+   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app 腾空间。flash 77.51%。跑完必测把 `nsh` 烧回去。
 
    两者装不进同一个镜像：全塞进 `nsh` 会溢出到 102%。
 
-   **已知补不上的三项**（原因见 PORTING_NOTES 十六章末）：1.3.16 RNG（**已跑通，但只能分批**）、1.3.13 Timer（AON RTC 两个比较单元都已占用，`/dev/oneshot0` 需另起片内 TIMER 驱动）、1.3.5 的片内 flash MTD（用 SD 卡 `/dev/mmcsd0` 可代跑块设备用例，片内 flash 仍无驱动）。
+   **已知补不上的两项**（原因见 PORTING_NOTES 十六章末）：1.3.16 RNG（**已跑通，但只能分批**）、1.3.5 的片内 flash MTD（用 SD 卡 `/dev/mmcsd0` 可代跑块设备用例，片内 flash 仍无驱动）。
+
+   **1.3.13 Timer 已补齐并真机通过**（`chip/bk7258_timer.c` → `/dev/oneshot0`，`CONFIG_BK7258_TIMER`，详见 PORTING_NOTES 十九章）。用片内 TIMER 组 0，**占两个通道**：ch0 按需装填做 oneshot，ch1 满量程自由跑做 `ONESHOT_CURRENT` 的时基——用例拿前后两次 current 之差核对延时，所以 current 必须单调自由运行，一个通道办不到。系统 tick 仍走 AON RTC，两者互不干扰（oneshot 与 rtc 用例已同轮验证）。
+
+   这块的三个坑都会**静默失败**，动它之前先看文件头注释：① 计数时钟要靠写 `global_ctrl` 的 `soft_reset` 才启动，只开系统控制器那边的门控不够——不写这一位，通道使能了、终值装了，读回恒零且握手永不完成，而 `dev_id` 照样读出 `"TIMR"`、寄存器照样存得住值；② 没有独立中断使能位，`timerN_int_en` 是读回即状态、写 1 清除；③ 清中断必须自旋到读回为 0（跨 26 MHz 时钟域），否则处理函数立即重入。诊断工具 `timertest` 留在树里（读三个时钟位 + 握手是否超时 + 计数增量，四个实验一次跑完）。
 
    RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章）。注意 1.3.15 看门狗用例还要求**咬狗后复位原因报 `BOARDIOC_RESETCAUSE_SYS_RWDT`**，`src/bk7258_reset.c` 已实现读回路径，但该映射**未上板验证**。
 

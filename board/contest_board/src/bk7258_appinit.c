@@ -57,6 +57,9 @@
 #ifdef CONFIG_BK7258_WDT
 #  include "bk7258_wdt.h"
 #endif
+#ifdef CONFIG_BK7258_TIMER
+#  include "bk7258_timer.h"
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -163,6 +166,14 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: bk7258_wdt_lowerhalf_initialize: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_BK7258_TIMER
+  ret = bk7258_timer_oneshot_register("/dev/oneshot0");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: bk7258_timer_oneshot_register: %d\n", ret);
     }
 #endif
 

@@ -94,6 +94,19 @@ if(CONFIG_TTY_SIGINT)
     sigtest.c)
 endif()
 
+if(CONFIG_BK7258_TIMER)
+  # Instrument for TIMER group 0 (see src/timertest.c).
+  nuttx_add_application(
+    NAME
+    timertest
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    timertest.c)
+endif()
+
 if(CONFIG_TESTING_NIST_STS)
   # Instrument for the "MAX # OF OPENED FILES" wall the NIST suite hits.
   nuttx_add_application(
