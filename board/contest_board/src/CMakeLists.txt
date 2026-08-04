@@ -81,6 +81,19 @@ if(CONFIG_ETC_ROMFS)
   target_link_libraries(board PRIVATE romfs_etc)
 endif()
 
+if(CONFIG_TTY_SIGINT)
+  # Instrument for the console SIGINT chain (see src/sigtest.c).
+  nuttx_add_application(
+    NAME
+    sigtest
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    sigtest.c)
+endif()
+
 if(CONFIG_TESTING_NIST_STS)
   # Instrument for the "MAX # OF OPENED FILES" wall the NIST suite hits.
   nuttx_add_application(

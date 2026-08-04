@@ -1283,30 +1283,54 @@ CEN 没接到 CH340 控制线，**那本来就永远无效**，拿它当死机�
 死机佐证，可 README 8.2 早就写明本板 CEN 没接到 CH340 控制线，**它永远
 无效**。用一个永真命题去支持结论，是循环论证。
 
-**一个想补但没补成的洞**：控制台上 Ctrl-C 不能中断前台任务，跑飞的任务
-只能等它跑完或按 RST——这正是把上面那次误判的代价放大的原因之一。
+**顺手补掉的洞：控制台 Ctrl-C**。此前跑飞的前台任务完全没法中断，只能等它
+跑完或按 RST——这正是把上面那次误判的代价放大的原因之一。
 
-两个 defconfig 加了 `CONFIG_SIG_DEFAULT=y` + `CONFIG_TTY_SIGINT=y`
-（`CONFIG_SIG_SIGKILL_ACTION` 默认就是 y），构建通过、`.config` 确认生效、
-镜像也烧上了板——**但真机上 Ctrl-C 依然不中断**。拿 192 秒的 `ostest` 连测
-两次，两次 shell 都没收回。
+先走了一段弯路。两个 defconfig 加了 `CONFIG_SIG_DEFAULT=y` +
+`CONFIG_TTY_SIGINT=y`（`CONFIG_SIG_SIGKILL_ACTION` 默认就是 y），构建通过、
+`.config` 确认生效，我就宣布"补上了"——**真机上拿 192 秒的 `ostest` 连测两次，
+两次都杀不掉**。`.config` 里有值 ≠ 功能能用，这跟本章开头那次误判同源。
 
-代码侧逐环节都查过，看起来都对：
+然后又读了一轮代码，逐环节看都是对的：`uart_register()` 会为控制台置
+`ISIG | ECHO | ICANON`（serial.c:2102）；NSH 前台执行前发 `TIOCSCTTY`
+注册 pid、结束后发 `TIOCNOTTY` 释放（nsh_builtin.c:151/216），两个 ioctl
+驱动里都实现了；`INVALID_PROCESS_ID` 是 -1，首次注册不会被挡；信号投递就在
+`uart_recvchars()` 末尾的 `nxsig_tgkill()`，而且非 DMA 路径的调用点在
+`serial_io.c:288`，我们这条路是通的。读到这里就卡住了——**每一环都对，但它
+就是不工作**。
 
-- `uart_register()` 对控制台无条件置 `ISIG | ECHO | ICANON`（serial.c:2102）
-- NSH 前台执行前发 `TIOCSCTTY` 注册 pid、结束后发 `TIOCNOTTY` 释放
-  （nsh_builtin.c:151/216），两个 ioctl 驱动里都实现了（serial.c:1700/1716）
-- `INVALID_PROCESS_ID` 是 -1，首次注册不会被 `dev->pid >= 0` 挡掉
-- SIGINT 的默认动作 `nxsig_abnormal_termination` 由
-  `CONFIG_SIG_SIGKILL_ACTION` 开启，已开
+**转折是停下来写探针**（`src/sigtest.c`）。两个门槛其实都能从用户态问出来：
+`tcgetattr()` 直接给 `c_lflag`；`TIOCSCTTY` 的返回值直接反映 pid 槽状态
+（返回 EINVAL 反而是健康的——说明已经有人注册了）。两个数一出来答案唯一：
 
-**还没查的**：0x03 这个字节到底有没有走到 `uart_check_signo()`——ICANON
-行缓冲有没有先把它吃掉，以及 `dev->pid` 运行时的实际取值。要往下查得在板上
-插桩（那几个文件都在公共仓，不能改，只能从板级绕）。
+```
+c_lflag = 0x00000000   ISIG=NO ICANON=no ECHO=no
+TIOCSCTTY -> -1, errno 22   (pid 槽已占用，这一环正常)
+```
 
-**记这一条的教训**：`.config` 里有值 ≠ 功能能用。我一度就是看构建通过加
-配置项生效就宣布"补上了"，这跟本章开头那次误判是同一种错——用间接证据
-代替真机验证。
+**ISIG、ECHO、ICANON 三个全零**。这三个是 `uart_register()` 里同一条语句设的，
+全零就意味着那条语句从没执行——即注册时 `dev->isconsole` 为假。而设它的
+`arm_earlyserialinit()` **在本移植里从来没有被调用过**：早期控制台是走
+`bk7258_lowputc()` 自己起的，`__start` 不调它，NuttX 的 arch 代码里也没有
+调用点。于是 `uart_check_special()` 第一句 `if ((tc_lflag & ISIG) == 0)`
+直接返回，Ctrl-C 那个字节只是缓冲区里普通的一字节。
+
+**修法一行**，在 `arm_serialinit()` 注册控制台之后：
+
+```c
+CONSOLE_DEV.tc_lflag |= ISIG;
+```
+
+**刻意不去设 `isconsole`**——那会连带打开 ECHO 和 ICANON，而 NSH 的 readline
+自己做行编辑与回显，驱动层再来一遍就是双重回显；本章第一节那场控制台 RX
+的仗也说明这块行为不该顺手动。只置真正需要的那一位，修完
+`c_lflag = 0x1`，ECHO/ICANON 仍为 0。
+
+真机复验：`ostest` 正常需 192 秒，**8.5 秒被 Ctrl-C 杀掉**，shell 立刻收回。
+
+**教训**：读代码读到"每一环都对但就是不工作"时，那一步该停——继续读只会
+把同一个盲区再走一遍。改成向系统提问（哪怕只是两个能从用户态读到的数），
+一次就定死了。`sigtest` 留在树里，下次控制台信号出问题不必再推一遍。
 
 **排查过程留档**（结论虽然作废，路径本身可复用）：
 

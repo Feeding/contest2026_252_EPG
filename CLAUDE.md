@@ -102,7 +102,8 @@ CONFIG_ARCH_BOARD_CUSTOM_DIR="../vendor/openvela/boards/contest2026_252_board"
 | 接口 | 职责 | 本仓文件 |
 |---|---|---|
 | `__start` | 清 .bss、拷 .data/RAM 函数、初始化时钟与串口、设栈限 → `nx_start()` | `chip/bk7258_start.c` |
-| `arm_earlyserialinit` / `arm_lowputc` | `nx_start` 之前的控制台寄存器初始化与打印 | `chip/bk7258_serial.c`、`chip/bk7258_lowputc.c` |
+| `arm_lowputc` | `nx_start` 之前的控制台初始化与打印 | `chip/bk7258_lowputc.c` |
+| ~~`arm_earlyserialinit`~~ | **定义了但从没被调用**——早期控制台走 `bk7258_lowputc()`，`__start` 不调它，NuttX arch 侧也没有调用点。它里面那句 `isconsole = true` 因此从未执行，Ctrl-C 曾经整条链失效就是这么来的（PORTING_NOTES 十七章）。动它之前先读那一节。 | `chip/bk7258_serial.c` |
 | `up_putc` | OS 内部日志出口 | `chip/bk7258_serial.c` |
 | `arm_serialinit` | `uart_register("/dev/console", ...)` | `chip/bk7258_serial.c` |
 | `up_timer_initialize` | 系统节拍 | `chip/bk7258_timerisr.c`（SysTick） |
@@ -166,7 +167,7 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    **纪律**：判"卡死"之前先确认有没有观察通道。长任务丢后台（`&`）留出 shell，`ps` 一眼分清 `Ready`（在跑）和 `Waiting`（真卡住）。另外 DTR/RTS 无响应不能当死机证据——本板 CEN 没接 CH340 控制线，它**永远**无效（README 8.2）。
 
-   **控制台 Ctrl-C 目前不可用**：`CONFIG_TTY_SIGINT` / `CONFIG_SIG_DEFAULT` 已加进两个 defconfig 且 `.config` 生效，但真机上仍不能中断前台任务（192 秒的 `ostest` 连测两次都没收回）。代码侧 ISIG、TIOCSCTTY/TIOCNOTTY、SIGINT 默认动作逐环节看都对，未查的是 0x03 有没有被 ICANON 行缓冲吃掉。所以**跑长任务前请先用 `&` 丢后台**，别指望 Ctrl-C 能救。详见 PORTING_NOTES 十七章。
+   **控制台 Ctrl-C 可用**（`CONFIG_TTY_SIGINT` + `CONFIG_SIG_DEFAULT`，外加 `arm_serialinit()` 里一行 `CONSOLE_DEV.tc_lflag |= ISIG`）。根因是本移植从不调用 `arm_earlyserialinit()`，`isconsole` 在注册时为假，`uart_register()` 那条设 `ISIG|ECHO|ICANON` 的语句从没执行——**不要改成设 `isconsole`**，那会连带打开驱动层回显与规范模式，和 NSH 的 readline 打架。诊断工具 `sigtest` 留在树里（`tcgetattr` 读 `c_lflag`、`TIOCSCTTY` 返回值判 pid 槽）。实测 `ostest` 8.5 秒被杀掉。详见 PORTING_NOTES 十七章。
    - ⚠️ **该压测是破坏性的**：`SECTORS_RANGE 0.95`，对整卡 95% 扇区写随机数据。它擦掉过一次原厂表情素材。跑任何带 stress 的用例前先读源码、先备份目标盘。
 
    **两个配置，别混用**：

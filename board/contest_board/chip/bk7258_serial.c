@@ -34,6 +34,8 @@
 #include <nuttx/arch.h>
 #include <nuttx/irq.h>
 #include <nuttx/fs/ioctl.h>
+#include <termios.h>
+
 #include <nuttx/serial/serial.h>
 #include <nuttx/kthread.h>
 #include <nuttx/signal.h>
@@ -773,6 +775,24 @@ void arm_serialinit(void)
 {
 #ifdef CONSOLE_DEV
   uart_register("/dev/console", &CONSOLE_DEV);
+
+#ifdef CONFIG_TTY_SIGINT
+  /* Turn on ISIG for the console, which is what gates the Ctrl-C path:
+   * uart_recvchars() -> uart_check_special() returns immediately unless this
+   * bit is set, so without it the interrupt character is just another byte
+   * in the receive buffer and no runaway task can ever be stopped.
+   *
+   * uart_register() would normally do this itself, but only for a device
+   * whose isconsole flag is set at registration time, and it sets ECHO and
+   * ICANON in the same breath.  This port never reaches that path -- its
+   * early console comes up through bk7258_lowputc() rather than
+   * arm_earlyserialinit(), which nothing calls -- and enabling driver-side
+   * echo and canonical mode underneath NSH's own line editing would be a
+   * behaviour change nobody asked for.  So set the one bit that matters.
+   */
+
+  CONSOLE_DEV.tc_lflag |= ISIG;
+#endif
 #endif
 #ifdef TTYS0_DEV
   uart_register("/dev/ttyS0", &TTYS0_DEV);
