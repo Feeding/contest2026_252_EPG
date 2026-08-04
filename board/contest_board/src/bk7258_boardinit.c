@@ -32,6 +32,7 @@
 #include "bk7258_rtc.h"
 #include "bk7258_wdt.h"
 #include "bk7258_gpio.h"
+#include "bk7258_reset_reason.h"
 
 #include <nuttx/kmalloc.h>
 #include <syslog.h>
@@ -147,6 +148,20 @@ void board_late_initialize(void)
 
   bk7258_serial_monitor_start();
 
+  /* Latch why this boot happened before anything else can disturb the
+   * always-on field.  Same domain-readiness argument as the RTC below: not
+   * from __start(), but safe by the time the console and watchdog are up.
+   */
+
+  bk7258_reset_cause_latch();
+
+  /* The NMI watchdog stage.  Same domain-readiness argument as the latch
+   * above and the RTC below: the peripheral block at 0x44800000 must not be
+   * addressed before its clock is running, and by here it is.
+   */
+
+  bk7258_wdt_nmi_initialize();
+
 #ifdef CONFIG_BK7258_RTC
   /* The AON RTC is brought up here, not in up_rtc_initialize().  It needs a
    * running system tick to measure its own clock rate against, and the AON
@@ -212,6 +227,14 @@ void board_late_initialize(void)
 int board_reset(int status)
 {
   UNUSED(status);
+
+  /* Say it was us, so the next boot does not report this as a spontaneous
+   * watchdog bite.  Must precede the reset -- the always-on field is what
+   * carries the answer across.
+   */
+
+  bk7258_reset_reason_set(BK7258_RESET_REBOOT);
+
   bk7258_wdt_reboot();
   return 0;
 }

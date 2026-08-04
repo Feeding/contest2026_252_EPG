@@ -1,8 +1,25 @@
 #
-# NSH baseline for the Agora ConvoAI Kit R1 (Beken BK7258), CPU0.
+# xTS verification image for the Agora ConvoAI Kit R1 (Beken BK7258), CPU0.
 #
 # Console is UART0 on GPIO10/GPIO11, which reaches the host through the
 # on-board CH340 USB-serial bridge.
+#
+# This is configs/nsh with the whole mandatory self-test set switched on and
+# the product features that will not fit alongside it switched off: the
+# closed BLE stack and its dependencies (unqlite, libuv, mbedtls) and the
+# three demo applications (eyes, face, snap).  The app partition is 1728 KB
+# and configs/nsh already occupies 93% of it, so the two cannot coexist.
+#
+# Run the mandatory cases against this image, then flash configs/nsh back.
+# That order is what the openvela porting guide describes -- self-test is a
+# verification build, not the shipping one.
+#
+# Build:
+#   ./build.sh vendor/openvela/boards/contest2026_252_board/configs/xts \
+#       --cmake -j8
+#
+# Note that adding a CONFIG here requires deleting cmake_out/<board>_xts
+# first; see the discipline note in the repository CLAUDE.md.
 #
 CONFIG_ARCH="arm"
 CONFIG_ARCH_BOARD_CUSTOM=y
@@ -41,7 +58,7 @@ CONFIG_DEBUG_ERROR=y
 CONFIG_DEBUG_FEATURES=y
 CONFIG_DEBUG_SYMBOLS=y
 CONFIG_DEBUG_WARN=y
-CONFIG_DEFAULT_TASK_STACKSIZE=4096
+CONFIG_DEFAULT_TASK_STACKSIZE=16384
 CONFIG_DEV_CONSOLE=y
 CONFIG_DEV_NULL=y
 CONFIG_DEV_ZERO=y
@@ -55,7 +72,7 @@ CONFIG_MAX_TASKS=16
 CONFIG_NSH_ARCHINIT=y
 CONFIG_NSH_BUILTIN_APPS=y
 CONFIG_NSH_FILEIOSIZE=512
-CONFIG_NSH_LINELEN=64
+CONFIG_NSH_LINELEN=256
 CONFIG_NSH_READLINE=y
 CONFIG_PREALLOC_TIMERS=4
 CONFIG_RAM_SIZE=655360
@@ -94,7 +111,6 @@ CONFIG_RTC_EXTERNAL=y
 CONFIG_BK7258_WDT=y
 CONFIG_WATCHDOG=y
 CONFIG_EXAMPLES_WATCHDOG=y
-CONFIG_BK7258_HCI_TRANSPORT=y
 CONFIG_BK7258_I2C1=y
 CONFIG_I2C=y
 CONFIG_I2C_DRIVER=y
@@ -105,9 +121,6 @@ CONFIG_SPI=y
 CONFIG_LCD=y
 CONFIG_LCD_FRAMEBUFFER=y
 CONFIG_VIDEO_FB=y
-CONFIG_CONTEST_EYES=y
-CONFIG_CONTEST_FACE=y
-CONFIG_CONTEST_SNAP=y
 CONFIG_EXAMPLES_FB=y
 CONFIG_MM_REGIONS=3
 CONFIG_SCHED_HPWORK=y
@@ -171,65 +184,15 @@ CONFIG_SIG_EVTHREAD=y
 CONFIG_ONESHOT=y
 CONFIG_ALARM_ARCH=y
 CONFIG_ONESHOT_COUNT=y
-CONFIG_LIBUV=y
-# CONFIG_LIBUV_BACKEND_EPOLL is not set
-CONFIG_LIBUV_EXTENSION=y
-CONFIG_UNQLITE=y
-CONFIG_BLUETOOTH=y
-CONFIG_BLUETOOTH_FRAMEWORK=y
-CONFIG_BLUETOOTH_FRAMEWORK_SOCKET_IPC=y
-CONFIG_BLUETOOTH_SERVER=y
-CONFIG_BLUETOOTH_IPC_JOIN_LOOP=y
-CONFIG_BLUETOOTH_STACK_BREDR_ZBLUE=y
-CONFIG_BLUETOOTH_BLE_SUPPORT=y
-CONFIG_BLUETOOTH_BLE_ADV=y
-CONFIG_BLUETOOTH_BLE_SCAN=y
-CONFIG_BLUETOOTH_LE_ADVERTISER_MAX_NUM=1
-CONFIG_BLUETOOTH_LE_SCANNER_MAX_NUM=1
-CONFIG_BLUETOOTH_SERVICE=y
-CONFIG_BLUETOOTH_STACK_LE_ZBLUE=y
-CONFIG_BLUETOOTH_STORAGE_UNQLITE_SUPPORT=y
-CONFIG_BLUETOOTH_SERVICE_HCI_UART_NAME="/dev/ttyHCI0"
-CONFIG_BLUETOOTH_TOOLS=y
-CONFIG_BT=y
-CONFIG_BT_H4=y
-CONFIG_BT_UART_ON_DEV_NAME="/dev/ttyHCI0"
-CONFIG_BT_GATT_DYNAMIC_DB=y
-CONFIG_BT_DEVICE_NAME_DYNAMIC=y
-CONFIG_TLS_NELEM=4
-CONFIG_TLS_TASK_NELEM=4
-CONFIG_CRYPTO_MBEDTLS=y
-CONFIG_BT_PERIPHERAL=y
-CONFIG_BT_CENTRAL=y
-CONFIG_BT_SMP=y
-CONFIG_BT_PRIVACY=y
-CONFIG_BT_MAX_PAIRED=4
-CONFIG_BT_MAX_CONN=3
-CONFIG_BT_DEVICE_NAME="openvela-EPG"
-CONFIG_BT_DEVICE_NAME_MAX=32
-CONFIG_BT_CLASSIC=y
-# CONFIG_BT_GATT_CACHING is not set
-# CONFIG_BT_HCI_ACL_FLOW_CONTROL is not set
-CONFIG_BT_GATT_CLIENT=y
-CONFIG_FS_LOCK_BUCKET_SIZE=4
 CONFIG_PTHREAD_MUTEX_TYPES=y
-CONFIG_BT_POWER_MODE_CONTROL=y
 CONFIG_NET=y
 CONFIG_NET_LOCAL=y
 CONFIG_NET_LOCAL_STREAM=y
-CONFIG_DRIVERS_WIRELESS=y
-CONFIG_DRIVERS_BLUETOOTH=y
-# CONFIG_BLUETOOTH_GATT_CLIENT is not set
-# CONFIG_BT_AVRCP is not set
-# CONFIG_BT_AVCTP is not set
-# CONFIG_BLUETOOTH_LOG is not set
 CONFIG_NETDEV_LATEINIT=y
 CONFIG_DEV_URANDOM=y
 CONFIG_DEV_URANDOM_XORSHIFT128=y
 CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=32768
 CONFIG_SYSTEM_WORKQUEUE_NO_YIELD=y
-CONFIG_UART_BTH4=y
-CONFIG_BT_EXT_ADV_LEGACY_SUPPORT=y
 
 #
 # Coverage for the xTS "general self-test" set, which the openvela porting
@@ -261,16 +224,6 @@ CONFIG_CRYPTO=y
 # 1.3.5 Flash/block device.  cmocka_driver_block reaches a block driver
 # through the block-to-character shim.
 CONFIG_BCH=y
-#
-# 1.3.16 (RNG / nist_sts) and 1.3.17 (Crypto / cryptodev) are NOT here.
-# This image is already at 92% of the 1728 KB app partition -- the closed
-# BLE stack and the display pipeline account for most of it -- and those two
-# suites together overflow it by 36 KB.  They live in configs/xts instead,
-# which is the image to flash when running the mandatory set.  Splitting is
-# the intended flow anyway: xTS is run against a verification build, not
-# against the product image.
-#
-
 # 1.3.15 Watchdog.  The case reads the reset cause back after each bite and
 # expects BOARDIOC_RESETCAUSE_SYS_RWDT; src/bk7258_reset.c answers it out of
 # the always-on PMU retention field.
@@ -288,9 +241,66 @@ CONFIG_BK7258_WDT_NMI=y
 CONFIG_SIG_DEFAULT=y
 CONFIG_TTY_SIGINT=y
 
-# 1.3.11 UART file transfer, and the only way to get bulk data onto this
-# board: the SD NAND is soldered (SDIO on GPIO14-19), so the expression
-# assets under /mnt cannot be written from a card reader.  "rb -d
-# /dev/console" receives a Ymodem batch from the host's lsz.
-CONFIG_SYSTEM_YMODEM=y
-CONFIG_SYSTEM_YMODEM_STACKSIZE=8192
+#
+# The rest of the mandatory set, which is what this config exists for.
+#
+# 1.3.17 Crypto.  The cases open /dev/crypto, so cryptodev needs a software
+# cipher back end behind it -- this SoC's crypto accelerator is not driven.
+# 3DES_CBC/AES_CBC/AES_CTR/AES_XTS/HMAC default to y once TESTING_CRYPTO is
+# on; the three below default to n and the document asks for them.  (The
+# document's TESTING_CRYPTO_3DES_XTS does not exist; AES_XTS is the one this
+# tree has.)
+# CRYPTO_RANDOM_POOL is not optional here despite the name: cryptosoft.c's
+# Diffie-Hellman path references curve25519(), and nuttx/crypto/CMakeLists.txt
+# only compiles curve25519.c inside the CRYPTO_RANDOM_POOL branch.  Without
+# it the link fails on curve25519_generate_public.
+CONFIG_ALLOW_BSD_COMPONENTS=y
+CONFIG_CRYPTO_RANDOM_POOL=y
+CONFIG_CRYPTO_SW_AES=y
+CONFIG_CRYPTO_CRYPTODEV=y
+CONFIG_CRYPTO_CRYPTODEV_SOFTWARE_CRYPTO=y
+CONFIG_TESTING_CRYPTO=y
+CONFIG_TESTING_CRYPTO_HASH=y
+CONFIG_TESTING_CRYPTO_CRC32=y
+CONFIG_TESTING_CRYPTO_ECDSA=y
+
+#
+# 1.3.16 RNG (nist_sts), against /dev/urandom (DEV_URANDOM above).
+#
+# apps/ does not ship the suite; it downloads sts-2_1_2.zip from NIST at
+# configure time, and two things there do not line up -- the archive extracts
+# as "sts-2.1.2" while its CMakeLists globs "sts/src/*.c", and its
+# PATCH_COMMAND applies patches one directory level too deep.  Between them
+# no source is found, the build still succeeds, and only the link fails on an
+# unresolved nist_sts_main.  Run tools/fix_nist_sts.sh once before building
+# with this on; the fixup lives entirely inside a gitignored download
+# directory, so no tracked file in any public repository changes.
+#
+# The suite also keeps a stats.txt and a results.txt open for all 15 tests at
+# once, plus a summary and the input file -- past 30 descriptors.  Blocks of
+# 8 run out partway through and it reports that as "LOG FILES COULD NOT BE
+# OPENED", which reads like a missing directory but is not.
+#
+CONFIG_TESTING_NIST_STS=y
+CONFIG_NFILE_DESCRIPTORS_PER_BLOCK=64
+
+# 1.3.2 RAM read/write (fstest) and 1.3.3 RAM throughput (ramtest).  1.3.4
+# (random access) is already covered by cmocka_driver_block above.
+CONFIG_TESTING_FSTEST=y
+CONFIG_TESTING_RAMTEST=y
+
+# 1.1.9 / 1.1.13 C++.  HAVE_CXX only declares that the toolchain can compile
+# C++; the standard library is a separate choice and defaults to LIBCXXNONE,
+# which is why cxxtest first failed on a missing <map>.  cxxtest pulls in
+# <map>/<vector>/<fstream>/<iostream>, so it needs the full LLVM libc++ --
+# both it and libc++abi are vendored under nuttx/libs/libxx, so this builds
+# offline.  LIBCXX depends on TLS_NELEM > 0, which configs/nsh happens to
+# get from the Bluetooth block that this config drops, so it is set here
+# explicitly.
+CONFIG_HAVE_CXX=y
+CONFIG_TLS_NELEM=4
+CONFIG_TLS_TASK_NELEM=4
+CONFIG_LIBCXX=y
+CONFIG_LIBCXXABI=y
+CONFIG_EXAMPLES_HELLOXX=y
+CONFIG_TESTING_CXXTEST=y

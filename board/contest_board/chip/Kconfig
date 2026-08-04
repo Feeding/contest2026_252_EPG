@@ -92,6 +92,25 @@ config BK7258_RTC
 		the rate is measured at init.  Naming one of them in a config
 		symbol would state something the driver cannot promise.
 
+config BK7258_WDT_NMI
+	bool "Watchdog NMI stage (stack dump before the reset)"
+	default n
+	---help---
+		Run the peripheral-domain watchdog at 0x44800000 alongside the
+		always-on one, with a shorter period so it bites first.  It raises
+		the NMI exception rather than resetting, which buys a stack dump and
+		-- more usefully -- a chance to record the bite in the always-on PMU
+		field, so the next boot reports BOARDIOC_RESETCAUSE_SYS_RWDT instead
+		of "power on".  The always-on watchdog still does the actual reset.
+
+		NMI is outside PRIMASK and BASEPRI on Cortex-M, so this stage lands
+		even from inside a critical section, which is what the xTS watchdog
+		case (1.3.15) requires of a driver.
+
+		Turning this off restores exactly the previous behaviour: the
+		always-on watchdog resets the chip with no dump and no recorded
+		reason.
+
 config BK7258_WDT
 	bool "Watchdog character driver (/dev/watchdog0)"
 	default n

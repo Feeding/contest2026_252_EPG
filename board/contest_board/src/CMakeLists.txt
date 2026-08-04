@@ -21,7 +21,7 @@
 #
 # ##############################################################################
 
-set(SRCS bk7258_boardinit.c)
+set(SRCS bk7258_boardinit.c bk7258_reset.c)
 
 if(CONFIG_BOARDCTL)
   list(APPEND SRCS bk7258_appinit.c)
@@ -50,3 +50,58 @@ endif()
 target_sources(board PRIVATE ${SRCS})
 
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR})
+
+# The /etc ROMFS.  sched/init/nx_bringup.c mounts it before the init task
+# runs, which is what puts /etc/1.txt in place for the xTS md5 case, and
+# /etc/templates/template9 for the RNG one -- NonOverlappingTemplate reads
+# "templates/template<m>" relative to its working directory, and that file
+# ships in the NIST archive rather than with the test, so without it the run
+# produces 148 rows of 0.000000 that look like a failing generator and are
+# really a missing input.  2.6 KB; copy it next to the experiments tree
+# before running (see PORTING_NOTES).  rcS and
+# rc.sysinit go through RCSRCS (they are preprocessed, so they must stay free
+# of '#' comments); everything else is copied verbatim through RCRAWS.
+
+if(CONFIG_ETC_ROMFS)
+  nuttx_add_romfs(
+    NAME
+    etc
+    MOUNTPOINT
+    etc
+    RCSRCS
+    etc/init.d/rcS
+    etc/init.d/rc.sysinit
+    RCRAWS
+    etc/group
+    etc/1.txt
+    etc/templates/template9
+    PATH
+    ${CMAKE_CURRENT_LIST_DIR}/etc)
+
+  target_link_libraries(board PRIVATE romfs_etc)
+endif()
+
+if(CONFIG_TESTING_NIST_STS)
+  # Instrument for the "MAX # OF OPENED FILES" wall the NIST suite hits.
+  nuttx_add_application(
+    NAME
+    fdtest
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    fdtest.c)
+endif()
+
+if(CONFIG_CRYPTO)
+  nuttx_add_application(
+    NAME
+    md5_test
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    md5_test.c)
+endif()

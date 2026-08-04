@@ -107,6 +107,10 @@ static int bk7258_wdt_getstatus(FAR struct watchdog_lowerhalf_s *lower,
                                 FAR struct watchdog_status_s *status);
 static int bk7258_wdt_settimeout(FAR struct watchdog_lowerhalf_s *lower,
                                  uint32_t timeout);
+#ifdef CONFIG_BK7258_WDT_NMI
+static xcpt_t bk7258_wdt_capture(FAR struct watchdog_lowerhalf_s *lower,
+                                 xcpt_t handler);
+#endif
 
 /****************************************************************************
  * Private Data
@@ -120,12 +124,18 @@ static const struct watchdog_ops_s g_bk7258_wdt_ops =
   .getstatus  = bk7258_wdt_getstatus,
   .settimeout = bk7258_wdt_settimeout,
 
-  /* No capture: the AON watchdog resets the SoC directly and exposes no
-   * pre-timeout interrupt this port can hook, so promising a callback would
-   * be a lie.  The upper half reports WDIOC_CAPTURE as unsupported.
+#ifdef CONFIG_BK7258_WDT_NMI
+  /* Capture is only honest because of the NMI stage.  The always-on block
+   * resets the SoC with no warning; the peripheral block raises NMI first,
+   * and that is the moment the callback runs.  Without the stage there is no
+   * such moment, so the entry below goes back to NULL and the upper half
+   * reports WDIOC_CAPTURE as unsupported.
    */
 
+  .capture    = bk7258_wdt_capture,
+#else
   .capture    = NULL,
+#endif
   .ioctl      = NULL,
 };
 
@@ -327,3 +337,23 @@ int bk7258_wdt_lowerhalf_initialize(FAR const char *devpath)
 }
 
 #endif /* CONFIG_BK7258_WDT */
+
+/****************************************************************************
+ * Name: bk7258_wdt_capture
+ *
+ * Description:
+ *   WDIOC_CAPTURE.  Hands the callback to the NMI stage, which runs it in
+ *   place of the panic and keeps both watchdogs fed so the notification does
+ *   not become a reset.  Returns the previously installed handler.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_BK7258_WDT_NMI
+static xcpt_t bk7258_wdt_capture(FAR struct watchdog_lowerhalf_s *lower,
+                                 xcpt_t handler)
+{
+  UNUSED(lower);
+
+  return bk7258_wdt_capture_set(handler);
+}
+#endif
