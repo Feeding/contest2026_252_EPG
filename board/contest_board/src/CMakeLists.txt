@@ -94,6 +94,19 @@ if(CONFIG_TTY_SIGINT)
     sigtest.c)
 endif()
 
+if(CONFIG_BK7258_FLASH)
+  # Instrument for the on-chip flash controller (see src/flashtest.c).
+  nuttx_add_application(
+    NAME
+    flashtest
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    flashtest.c)
+endif()
+
 if(CONFIG_BK7258_TIMER)
   # Instrument for TIMER group 0 (see src/timertest.c).
   nuttx_add_application(

@@ -70,24 +70,53 @@
 #define BK7258_SYS_CLK_ENABLE       (BK7258_SYS_BASE + (0xc << 2))
 #define BK7258_SYS_CLK_EN_WDG_CPU   (1u << 31)
 
-/* Counter rate.  The vendor ships CONFIG_INT_WDT_PERIOD_MS=8000 for this
- * part and wdt_ll_set_period() doubles the millisecond count when the clock
- * divider is /16 (the value bk_wdt_driver_init() programs), so a period
- * register of 16000 means 8 s: the block counts at 2 kHz.  Everything below
- * is derived from that, not measured -- see the verification note in
- * PORTING_NOTES.
+/* Counter rate.
+ *
+ * This used to be the constant 2000, on the reasoning that the vendor
+ * programs a /16 divider and wdt_ll_set_period() then doubles a millisecond
+ * count.  The reasoning was sound and the premise was never checked: the
+ * vendor does not assume the divider at all, it reads it back every time.
+ * From middleware/soc/bk7258/hal/wdt_ll.h:
+ *
+ *     div 0 (/2)  -> 16 counts per ms
+ *     div 1 (/4)  ->  8
+ *     div 2 (/8)  ->  4
+ *     div 3 (/16) ->  2
+ *
+ * So a hardcoded 2000 is right only if the boot loader happens to leave the
+ * divider at 3, and is out by 2x, 4x or 8x otherwise -- an "8 second"
+ * watchdog that is really a one second one would be invisible under normal
+ * load and would bite under an unusual one.  Read it like the vendor does.
+ *
+ * The field is ckdiv_wdt, bits 3:2 of the system block's reg 0x0a
+ * (sys_struct.h), reached through sys_hal_nmi_wdt_get_clk_div().
  */
 
-#define BK7258_NMI_WDT_HZ           2000
-#define BK7258_NMI_WDT_MS(ms)       ((ms) * BK7258_NMI_WDT_HZ / 1000)
+#define BK7258_SYS_WDT_CLKDIV       (BK7258_SYS_BASE + (0xa << 2))
+#define BK7258_SYS_WDT_CLKDIV_SHIFT 2
+#define BK7258_SYS_WDT_CLKDIV_MASK  (3u << BK7258_SYS_WDT_CLKDIV_SHIFT)
+
+/* Counts per millisecond for each divider setting, indexed by the field. */
+
+#define BK7258_NMI_WDT_KHZ(div)     (16u >> (div))
+
+#define BK7258_NMI_WDT_MS(ms) \
+  ((ms) * BK7258_NMI_WDT_KHZ(bk7258_nmi_wdt_clkdiv()))
 
 /* Normal period.  Has to clear the 100 ms heartbeat by a wide margin so a
  * momentarily late feed cannot fire it, and stay under the always-on
- * block's ~65 s so this stage is always the one that bites first.  8 s is
- * what the vendor uses.
+ * block's ~65 s so this stage is always the one that bites first.
+ *
+ * 4 s rather than the vendor's 8: the period field is 16 bits, and at this
+ * board's divider (0, so 16 counts per ms) 8000 ms needs 128000 counts and
+ * does not fit.  The old code asked for 8000 ms, computed it at an assumed
+ * 2 counts per ms, and armed 16000 counts -- one second at the real rate.
+ * That is what a watchdog nobody could explain looked like from the inside.
+ * The ceiling here is 0xffff / 16 = 4095 ms, so 4000 is the most that fits
+ * with room to round.
  */
 
-#define BK7258_NMI_WDT_PERIOD_RUN   BK7258_NMI_WDT_MS(8000)
+#define BK7258_NMI_WDT_PERIOD_RUN   BK7258_NMI_WDT_MS(4000)
 
 /* Period armed once a /dev/watchdog0 deadline has passed: short enough that
  * the panic follows the missed ping promptly.
@@ -129,6 +158,22 @@ static xcpt_t g_nmi_wdt_capture;
 #ifdef CONFIG_BK7258_WDT_NMI
 
 /****************************************************************************
+ * Name: bk7258_nmi_wdt_clkdiv
+ *
+ * Description:
+ *   The divider the boot loader left in the system block.  Read every time
+ *   rather than cached: it costs one load, and a cached copy would put us
+ *   right back to trusting a value nobody verified.
+ *
+ ****************************************************************************/
+
+static inline uint32_t bk7258_nmi_wdt_clkdiv(void)
+{
+  return (getreg32(BK7258_SYS_WDT_CLKDIV) & BK7258_SYS_WDT_CLKDIV_MASK) >>
+         BK7258_SYS_WDT_CLKDIV_SHIFT;
+}
+
+/****************************************************************************
  * Name: bk7258_nmi_wdt_arm
  *
  * Description:
@@ -139,15 +184,46 @@ static xcpt_t g_nmi_wdt_capture;
 
 static void bk7258_nmi_wdt_arm(uint32_t period)
 {
+  irqstate_t flags;
+
   if (!g_nmi_wdt_live)
     {
       return;
     }
 
-  period &= 0xffff;
+  /* Clamp rather than mask.  Masking is what turned an over-long request
+   * into a short period silently -- 128000 counts became 62464 -- and the
+   * vendor clamps.  A watchdog that arms for less than it was asked is
+   * worse than one that refuses.
+   */
+
+  if (period > 0xffff)
+    {
+      period = 0xffff;
+    }
+
+  /* The two writes are one magic sequence and the block only reloads when
+   * it sees them back to back.  Split them and the reload is simply lost.
+   *
+   * This used to be safe by accident: the only caller was the tick handler.
+   * It stopped being safe the moment a second caller appeared in task
+   * context (bk7258_flash.c feeds around its erases), so the masking below
+   * is a real correctness fix for a real race.
+   *
+   * It is NOT, however, the cause of the post-stress-test bite that it was
+   * written to chase -- adding it changed nothing, measured.  Do not read
+   * this comment as an explanation of that failure; see PORTING_NOTES for
+   * what is and is not known about it.  Note also that up_irq_save() cannot
+   * exclude the NMI handler itself, which calls this function and is outside
+   * PRIMASK by design.
+   */
+
+  flags = up_irq_save();
 
   putreg32(0x5a0000 | period, BK7258_NMI_WDT_CTRL);
   putreg32(0xa50000 | period, BK7258_NMI_WDT_CTRL);
+
+  up_irq_restore(flags);
 }
 
 /****************************************************************************
@@ -212,7 +288,18 @@ static int bk7258_nmi_wdt_handler(int irq, FAR void *context, FAR void *arg)
 
 void bk7258_wdt_arm(uint32_t period)
 {
-  period &= 0xffff;
+  irqstate_t flags;
+
+  /* Clamp rather than mask.  Masking is what turned an over-long request
+   * into a short period silently -- 128000 counts became 62464 -- and the
+   * vendor clamps.  A watchdog that arms for less than it was asked is
+   * worse than one that refuses.
+   */
+
+  if (period > 0xffff)
+    {
+      period = 0xffff;
+    }
 
   /* Only the always-on watchdog is written.  The first build of this file
    * also wrote the peripheral-domain counter at 0x44800010 -- copying the
@@ -225,8 +312,17 @@ void bk7258_wdt_arm(uint32_t period)
    * routine treats as primary, and is sufficient to reset the SoC.
    */
 
+  /* Indivisible for the same reason as the NMI block's reload above: the
+   * pair is one magic sequence, and an interrupt landing between the halves
+   * silently drops the reload.
+   */
+
+  flags = up_irq_save();
+
   putreg32(0x5a0000 | period, BK7258_AON_WDT_BASE);
   putreg32(0xa50000 | period, BK7258_AON_WDT_BASE);
+
+  up_irq_restore(flags);
 }
 
 /****************************************************************************
@@ -346,8 +442,17 @@ void bk7258_wdt_nmi_initialize(void)
 
   bk7258_nmi_wdt_arm(BK7258_NMI_WDT_PERIOD_RUN);
 
-  binfo("NMI watchdog armed, period %u counts at %u Hz\n",
-        (unsigned)BK7258_NMI_WDT_PERIOD_RUN, (unsigned)BK7258_NMI_WDT_HZ);
+  /* Loud rather than binfo: the divider is the boot loader's, not ours, and
+   * an "8 second" watchdog that is silently a one second one is exactly the
+   * kind of thing that should be visible in every boot log.
+   */
+
+  syslog(LOG_INFO, "wdt: nmi clkdiv=%u -> %u counts/ms, period %u = %u ms\n",
+         (unsigned)bk7258_nmi_wdt_clkdiv(),
+         (unsigned)BK7258_NMI_WDT_KHZ(bk7258_nmi_wdt_clkdiv()),
+         (unsigned)BK7258_NMI_WDT_PERIOD_RUN,
+         (unsigned)(BK7258_NMI_WDT_PERIOD_RUN /
+                    BK7258_NMI_WDT_KHZ(bk7258_nmi_wdt_clkdiv())));
 #endif
 }
 

@@ -64,6 +64,62 @@ config BK7258_UART2
 	---help---
 		UART2 on GPIO40 (RX) / GPIO41 (TX), alternate GPIO30/GPIO31.
 
+config BK7258_FLASH
+	bool "On-chip flash MTD"
+	default n
+	---help---
+		The flash controller at 0x44030000, exposing the part of the 8MB
+		SPI flash that no partition claims as an MTD device.
+
+		The firmware executes in place out of this same chip, so the region
+		is not negotiable: the vendor partition table ends at 0x400000 and
+		everything below it belongs to the boot loader, the three cores'
+		app images, and the RF calibration data that the BLE stack reads.
+		Only the space above that is offered, and the driver refuses any
+		address outside it rather than trusting its caller.
+
+		Note the two address spaces.  The controller inserts two CRC bytes
+		every 32 on the CPU's instruction path, so an XIP address is 32/34
+		of a physical one; the software register path used here is raw
+		physical bytes and no CRC is involved.  src/flashtest.c dumps the
+		controller state and known regions if that ever needs re-checking.
+
+if BK7258_FLASH
+
+config BK7258_FLASH_OFFSET
+	hex "Region start (physical byte offset)"
+	default 0x500000
+	---help---
+		Physical offset of the first sector the MTD may touch.  Must be
+		sector aligned.
+
+		The default is measured, not chosen for roundness.  The vendor
+		partition table fills exactly 0x400000 and stops; a scan of the
+		space above it found 0x400000..0x4d0000 already carrying
+		CRC-encoded erased content from the factory tooling, and nothing
+		between 0x4d0000 and 0x7fa000.  0x500000 clears the written part
+		with margin.
+
+config BK7258_FLASH_SIZE
+	hex "Region size in bytes"
+	default 0x2f0000
+	---help---
+		Length of the region, sector aligned.  The default ends at
+		0x7f0000, leaving the last 64KB alone: the top six sectors are in
+		use, and the one at 0x7fe000 begins with "TLV", which is factory
+		data this board's RF calibration is very likely to need.  Erasing
+		it is not something a test should be able to do by accident.
+
+config BK7258_FLASH_BLOCKSIZE
+	int "MTD read/write block size"
+	default 512
+	---help---
+		Must divide the 4096-byte erase sector and be a multiple of the
+		controller's 32-byte transfer unit.  512 is the default because
+		FAT expects sectors of at least that size.
+
+endif # BK7258_FLASH
+
 config BK7258_TIMER
 	bool "Oneshot timer (TIMER group 0)"
 	default n

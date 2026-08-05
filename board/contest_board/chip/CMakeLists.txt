@@ -33,6 +33,10 @@ if(CONFIG_BK7258_TIMER)
   list(APPEND SRCS bk7258_timer.c)
 endif()
 
+if(CONFIG_BK7258_FLASH)
+  list(APPEND SRCS bk7258_flash.c)
+endif()
+
 if(CONFIG_BK7258_WDT)
   list(APPEND SRCS bk7258_wdt_lowerhalf.c)
 endif()

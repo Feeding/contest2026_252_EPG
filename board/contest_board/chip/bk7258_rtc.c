@@ -545,19 +545,85 @@ static void bk7258_rtc_ack(uint32_t w1c_bit)
 
 #define BK7258_RTC_HORIZON  0x40000000ull
 
+/* How many times to re-aim before giving up.  Each pass costs two AON reads
+ * and a store; the loop only ever spins when something has just held the
+ * CPU for longer than the gap being armed, which is rare and self-limiting.
+ */
+
+#define BK7258_RTC_ARM_TRIES  8
+
+/* Never aim closer than this many counter ticks.
+ *
+ * The block is in the always-on domain and counts at 32 kHz, so a store
+ * from the CPU side needs up to one whole tick -- about 31 us -- to cross
+ * into it and take effect.  Aiming one tick ahead therefore races the write
+ * itself: the counter can reach the target while the new compare value is
+ * still in flight, and a comparator that matches on equality then never
+ * matches at all.  The channel goes quiet permanently, and since the only
+ * thing that re-arms it is its own interrupt, so does the system clock.
+ *
+ * Four ticks is 125 us, comfortably past the crossing, and costs nothing:
+ * it only applies to deadlines that are already in the past, which are
+ * serviced on the very next interrupt anyway.
+ *
+ * The same domain-crossing rule bit this port once before, in the timer's
+ * write-one-to-clear status bit (bk7258_timer.c) -- there the fix was to
+ * spin until the write read back.  Here there is nothing to read back, so
+ * the margin has to be built into the value.
+ */
+
+#define BK7258_RTC_MIN_STEP   4ull
+
 static void bk7258_rtc_arm(uint32_t cmp_offset, uint32_t int_en,
                            uint64_t target)
 {
   uint64_t now;
   uint64_t delta;
   uint32_t step;
+  int i;
 
-  now   = bk7258_rtc_ticks();
-  delta = target > now ? target - now : 1;
-  step  = delta > BK7258_RTC_HORIZON ? (uint32_t)BK7258_RTC_HORIZON
-                                     : (uint32_t)delta;
+  /* Confirm the compare value is still in the future after storing it.
+   *
+   * The comparator matches on equality with a free-running counter, so a
+   * value written after the counter has already passed it never matches and
+   * the channel goes silent for good.  Between reading the counter and
+   * storing now+step there is a window, and when a deadline has already
+   * expired step is 1 -- a single 32 kHz tick, about 31 us.  Anything that
+   * holds the CPU longer than that between the two lines loses the
+   * interrupt permanently.
+   *
+   * That is not hypothetical.  This is the system time base, so losing it
+   * stops the scheduler's clock and the watchdog heartbeat that rides this
+   * handler, while the console keeps working because the UART is its own
+   * interrupt -- a board that answers but never runs a timer again, and
+   * then resets one watchdog period later with no explanation.  It took an
+   * on-chip flash driver to expose it: bk7258_flash.c masks interrupts
+   * around each 32-byte program, roughly 0.7 ms, some twenty times the
+   * window.  Ordinary load never came close, which is why this survived
+   * this long.
+   */
 
-  putreg32((uint32_t)(now + step), BK7258_AON_RTC_BASE + cmp_offset);
+  for (i = 0; i < BK7258_RTC_ARM_TRIES; i++)
+    {
+      now   = bk7258_rtc_ticks();
+      delta = target > now ? target - now : BK7258_RTC_MIN_STEP;
+
+      if (delta < BK7258_RTC_MIN_STEP)
+        {
+          delta = BK7258_RTC_MIN_STEP;
+        }
+
+      step  = delta > BK7258_RTC_HORIZON ? (uint32_t)BK7258_RTC_HORIZON
+                                         : (uint32_t)delta;
+
+      putreg32((uint32_t)(now + step), BK7258_AON_RTC_BASE + cmp_offset);
+
+      if (bk7258_rtc_ticks() < now + step)
+        {
+          break;
+        }
+    }
+
   bk7258_rtc_ctrl_modify(int_en, 0);
 }
 

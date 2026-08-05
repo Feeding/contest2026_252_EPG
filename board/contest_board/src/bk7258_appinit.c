@@ -60,6 +60,10 @@
 #ifdef CONFIG_BK7258_TIMER
 #  include "bk7258_timer.h"
 #endif
+#ifdef CONFIG_BK7258_FLASH
+#  include <nuttx/mtd/mtd.h>
+#  include "bk7258_flash.h"
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -174,6 +178,36 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: bk7258_timer_oneshot_register: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_BK7258_FLASH
+    {
+      FAR struct mtd_dev_s *mtd = bk7258_flash_initialize();
+
+      if (mtd == NULL)
+        {
+          syslog(LOG_ERR, "ERROR: bk7258_flash_initialize failed\n");
+        }
+      else
+        {
+          /* The raw MTD first, then a block device on top of it.  Both are
+           * useful: the xTS driver cases talk to /dev/mtd0 directly, while
+           * anything wanting a filesystem needs /dev/mtdblock0.
+           */
+
+          ret = register_mtddriver("/dev/mtd0", mtd, 0666, NULL);
+          if (ret < 0)
+            {
+              syslog(LOG_ERR, "ERROR: register_mtddriver: %d\n", ret);
+            }
+
+          ret = ftl_initialize(0, mtd);
+          if (ret < 0)
+            {
+              syslog(LOG_ERR, "ERROR: ftl_initialize: %d\n", ret);
+            }
+        }
     }
 #endif
 
