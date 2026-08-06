@@ -2168,3 +2168,49 @@ openvela 不期待一个独立的 supplicant 进程去喂。厂商 supplicant �
 3. **没有 `netdev_lower_quota_set()` 这个函数**——配额是直接赋值
    `dev->quota[NETPKT_TX] = N`（照 `nuttx/drivers/net/e1000.c`）。这一条是我按印象
    写的 API，链接期才暴露：**接口以树里的真实驱动为准，文档会滞后。**
+
+### 接缝在哪：厂商有一层干净的公开 API（这改了工作量估计）
+
+`bk_idk/projects/wifi/` 下有 11 个示例工程（`sta_connect`、`softap`、`scan`、
+`iperf`、`wapi`…）。看 `sta_connect/main/sta_connect_main.c` 才发现，**应用侧根本
+不碰 `bk_wifi/src` 的内部**，只 include 三个公开头：
+
+```c
+#include <modules/wifi.h>       /* bk_wifi_init / sta_set_config / sta_start / scan_start */
+#include <components/netif.h>   /* bk_netif_init */
+#include <components/event.h>   /* EVENT_WIFI_STA_CONNECTED / EVENT_NETIF_GOT_IP4 */
+```
+
+STA 全流程就是：填 `wifi_sta_config_t` → `bk_wifi_sta_set_config()` →
+`bk_wifi_sta_start()` → 等 `EVENT_WIFI_STA_CONNECTED`。AP 与扫描同理。
+
+**这与 `wireless_ops_s` 的形状几乎是对着设计的**：`essid` / `passwd` / `auth` 存参数，
+`connect()` 调那两个函数，事件回调里调 `netdev_lower_carrier_on()` / `off()`。
+
+**由此要收回本章前面的一个估计。** 前面说"要实现 204 项 `wifi_os_funcs_t` 适配表"
+——那张表是**替换厂商 OS 抽象层**时才需要填的。若我们把厂商栈整体编进来、自己只做
+上层转接，那 204 项由厂商自带的 `bk_wifi_adapter.c`（1901 行，SDK 里就有）填，我们
+要写的接口面只是十来个公开函数。真实工作量更接近「一层薄转接 + 收发路径」，而不是
+2000–3000 行适配表。
+
+两条路的取舍留给拿到头文件之后再定，但**默认应该是后者**：用厂商自己的 OS 适配层，
+只在最上面接 openvela 的 netdev/wireless，改动面最小、也不用维护分叉。
+
+### 阻断点没有因此改变
+
+`bk_wifi_init` / `bk_wifi_sta_set_config` / `bk_wifi_sta_start` / `bk_wifi_scan_start`
+**全部实现在 `components/bk_wifi/src/wifi_v2.c`**，而 `wifi_v2.c` 正是使用
+`struct vif_info_tag` 的 8 个文件之一。**门面干净，门后的实现仍然编不出来。**
+
+### 拿到头文件后的第一步（照这个顺序）
+
+1. 把 `components/bk_wifi/` + 依赖组件接进本仓构建，目标是**编过、链接过**，不求跑
+2. `bk_netif_init()` / `bk_wifi_init()` 能返回，事件回调能收到 —— 到这里说明厂商栈活了
+3. `wireless_ops_s` 的 `connect()` 接 `bk_wifi_sta_set_config()` + `bk_wifi_sta_start()`；
+   事件回调接 `netdev_lower_carrier_on()`
+4. 收发：`transmit()` 与 `receive()` 对接 `netpkt_t`（本章"三个照文档做会踩的坑"
+   那节的接口以树里驱动为准）
+5. AP 侧同理，走 `bk_wifi_ap_*`
+
+ABI 那两三个配置项（`CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 等）在第 1 步就要定对，
+见本章"ABI 风险"一节——**不要照 Kconfig 默认值填**。
