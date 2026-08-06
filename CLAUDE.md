@@ -196,7 +196,7 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    这块的三个坑都会**静默失败**，动它之前先看文件头注释：① 计数时钟要靠写 `global_ctrl` 的 `soft_reset` 才启动，只开系统控制器那边的门控不够——不写这一位，通道使能了、终值装了，读回恒零且握手永不完成，而 `dev_id` 照样读出 `"TIMR"`、寄存器照样存得住值；② 没有独立中断使能位，`timerN_int_en` 是读回即状态、写 1 清除；③ 清中断必须自旋到读回为 0（跨 26 MHz 时钟域），否则处理函数立即重入。诊断工具 `timertest` 留在树里（读三个时钟位 + 握手是否超时 + 计数增量，四个实验一次跑完）。
 
-   **WiFi 目前卡在两个没发布的头文件上**（完整勘察见 PORTING_NOTES 二十一章）：`components/bk_wifi/src/*.c` 逐个核对 include 后，**缺且仅缺 `sm_task.h` 和 `ps.h`**，两份 SDK（`bk_idk` / `bk_avdk_smp`）全盘 `find` 都没有，其余 include 齐备。前者带 `struct vif_info_tag` 等内部结构体的完整定义——公开头 `bk_private/bk_rw.h:230` 只给 `typedef void *VIF_INF_PTR`，而 `.c` 里做 `vif->type` 字段访问，必须要完整定义。索要话术见二十一章开头（校验参照：闭源库里 `vif_info_tab` 是 2640 字节全局数组）。
+   **WiFi 目前卡在两个没发布的头文件上**（完整勘察见 PORTING_NOTES 二十一章）：`components/bk_wifi/src/*.c` 逐个核对 include 后，**缺且仅缺 `sm_task.h` 和 `ps.h`**，三份 SDK 全盘 `find` 都没有（`bk_idk`、`bk_avdk_smp`、以及从 GitHub 拉的官方 `bekencorp/bk_avdk_smp` `release/v3.1.1.8`，留在 `/Users/apple/app/github.com/bk_armino_official`），其余 include 齐备。**这不是某份发布的疏漏，是博通公开渠道就不给**——官方版同样缺，且 `components/bk_ps/` 同样只有头文件零个 `.c`。也就是说公开 SDK 自己都编不过 WiFi 组件，只能向厂商索要。前者带 `struct vif_info_tag` 等内部结构体的完整定义——公开头 `bk_private/bk_rw.h:230` 只给 `typedef void *VIF_INF_PTR`，而 `.c` 里做 `vif->type` 字段访问，必须要完整定义。索要话术见二十一章开头（校验参照：闭源库里 `vif_info_tab` 是 2640 字节全局数组）。
 
    已量清楚的部分：闭源库外部依赖只有 79 个符号，且厂商预留了函数指针表 `wifi_os_funcs_t`（204 项）作为移植接缝，**不需要改厂商源码**；其中 26 项（含 `calibration_init`）直接在 `libbk_phy.a` 里转发即可，真正要设计的只有 25 项报文路径。但 supplicant 是硬依赖且接口是厂商私有的（openvela 没有 wpa_supplicant，且 `bk_wifi` 不走标准 `wpa_driver_ops`），要一并搬 150 个 .c / 171.6k 行。
 

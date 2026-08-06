@@ -1993,7 +1993,21 @@ sm_task.h    —— struct vif_info_tag 等内部结构体的完整定义
 ps.h         —— 低功耗状态机
 ```
 
-`bk_idk` 和 `bk_avdk_smp` 两份 SDK 全盘 `find` 都没有。其余 include 全部齐备。
+`bk_idk`、`bk_avdk_smp`，以及**从 GitHub 拉的官方 `bekencorp/bk_avdk_smp`
+`release/v3.1.1.8`**，三份全盘 `find` 都没有。其余 include 全部齐备。
+
+**这不是某一份发布的疏漏，是博通公开渠道就不提供。** 一开始的推断是"`bk_idk` 是
+声网定制裁剪版，官方版应该带全"，拉下来比对后推翻了：官方最新版同样没有这两个头，
+`components/bk_ps/` 同样是**只有头文件、零个 `.c`**（实现在闭源库里）。
+
+由此得到一个更硬的结论：`bk_wifi/CMakeLists.txt` 把 `rwnx_misc.c` 列进无条件编译
+清单，而它 `#include "sm_task.h"`——**公开 SDK 自己就编不过 WiFi 组件**，厂商内部
+构建必然另有一套不外发的头文件。所以"换个版本就有"这条路是堵死的，只能索要。
+
+> 比对用的官方 SDK 留在 `/Users/apple/app/github.com/bk_armino_official`
+> （`release/v3.1.1.8`，`ap/` + `cp/` 双核结构，组件在 `cp/components/` 下）。
+> 注意闭源库仍须用 `bk_idk` 那份——BLE 是拿它的 `libbluetooth_*` 跑通的，
+> 库与头文件版本必须配套。
 
 厂商对外只暴露不透明指针——`components/bk_wifi/include/bk_private/bk_rw.h:230` 是
 `typedef void *VIF_INF_PTR;`，公开头里的接口一律用它。但 `.c` 里做的是
@@ -2003,9 +2017,8 @@ ps.h         —— 低功耗状态机
 参照物：闭源库里 `vif_info_tab` 是 **0xa50 = 2640 字节**的全局数组
 （`nm -S libwifi.a` 实测），可用来校验拿到的定义对不对。
 
-所以 `components/bk_wifi/` 源码可见但**不自足**，等价于不可编译。两个文件都是
-Beken 内部普通头文件，而且是成对缺失（都属内部头），看起来像发布时按目录剥离，
-不像随机遗漏。
+所以 `components/bk_wifi/` 源码可见但**不自足**，等价于不可编译。两个都是 Beken 内部头，成对缺失，且三份发布一致——
+不是遗漏，是既定的发布边界。
 
 从二进制反推 2640 字节结构体的布局理论可行但不建议：一个字段错位就是静默内存
 损坏，代价参考十九、二十章。
