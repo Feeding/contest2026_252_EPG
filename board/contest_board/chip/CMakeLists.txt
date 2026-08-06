@@ -38,7 +38,14 @@ if(CONFIG_BK7258_FLASH)
 endif()
 
 if(CONFIG_BK7258_WIFI)
-  list(APPEND SRCS bk7258_wifi.c)
+  list(APPEND SRCS bk7258_wifi.c bk7258_wifi_osi.c bk7258_wifi_shim.c)
+
+  # Beken's WiFi driver sources, compiled with the vendor's own flags.
+  # See the header of this file for where those flags come from and why
+  # they cannot be guessed.
+  if(CONFIG_BK7258_WIFI_VENDOR)
+    include(${CMAKE_CURRENT_LIST_DIR}/bk7258_wifi_vendor.cmake)
+  endif()
 endif()
 
 if(CONFIG_BK7258_WDT)
@@ -105,3 +112,7 @@ if(CONFIG_BK7258_HCI_TRANSPORT)
 endif()
 
 target_sources(arch PRIVATE ${SRCS})
+
+if(CONFIG_BK7258_WIFI_VENDOR)
+  target_sources(arch PRIVATE ${BK_WIFI_OBJECTS})
+endif()

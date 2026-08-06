@@ -61,6 +61,23 @@ int rtos_unlock_mutex(void **mutex)
   return nxmutex_unlock((mutex_t *)*mutex);
 }
 
+/* Only the WiFi stack tears mutexes down; BLE holds its own for the life of
+ * the image.  It belongs here anyway, next to the allocation it undoes.
+ */
+
+int rtos_deinit_mutex(void **mutex)
+{
+  if (mutex == NULL || *mutex == NULL)
+    {
+      return -1;
+    }
+
+  nxmutex_destroy((mutex_t *)*mutex);
+  kmm_free(*mutex);
+  *mutex = NULL;
+  return 0;
+}
+
 void delay_us(uint32_t us)
 {
   up_udelay(us);

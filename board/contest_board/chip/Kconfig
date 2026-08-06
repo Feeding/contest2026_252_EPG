@@ -94,6 +94,22 @@ config BK7258_WIFI
 
 		See PORTING_NOTES chapter 21.
 
+config BK7258_WIFI_VENDOR
+	bool "Compile Beken's WiFi driver sources"
+	default n
+	depends on BK7258_WIFI
+	---help---
+		Build components/bk_wifi/src from the Beken SDK into this image.
+
+		The build flags come from the vendor's own build rather than from
+		guesswork -- see chip/bk7258_wifi_vendor.cmake for how to
+		regenerate them.  Two of them are not optional: without
+		-DBK_MAC=1 the version macro that gates half the driver is never
+		defined, and the 113 include directories have to keep their order
+		so that same-named headers resolve to the bk7258 copy.
+
+		Requires the Beken SDK checked out; BK_IDK_ROOT points at it.
+
 config BK7258_FLASH
 	bool "On-chip flash MTD"
 	default n

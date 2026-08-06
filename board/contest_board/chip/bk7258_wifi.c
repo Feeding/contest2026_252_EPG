@@ -193,8 +193,63 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
 {
   UNUSED(dev);
 
-  nerr("ERROR: WiFi MAC is not built -- see PORTING_NOTES ch.21\n");
+#ifdef CONFIG_BK7258_WIFI_VENDOR
+  /* First real call into the vendor stack.  Nothing above this point in the
+   * port has ever executed vendor MAC code, so a link failure here is the
+   * honest signal that the integration is not finished -- which is why the
+   * call is made from ifup() rather than hidden behind another stub.
+   *
+   * It goes through bk7258_wifi_glue.c rather than straight to
+   * bk_wifi_init() because the stack's entry point takes a config struct
+   * whose type only exists behind the vendor include path.  Declaring it
+   * here by hand once seemed harmless and cost an afternoon: see that
+   * file's header.
+   */
+
+    {
+      extern int bk7258_phy_adapter_init(void);
+      extern int bk7258_rf_adapter_init(void);
+      extern int bk7258_wifi_vendor_init(void);
+      static bool phy_ready = false;
+      int ret;
+
+      /* The radio's OS abstraction, before anything reaches the radio.
+       * bk7258_phy_osi.c has carried these tables since the BLE port and
+       * says so in its own header -- but only bk7258_ble.c ever called the
+       * initialisers, and the xts configuration builds without BLE.
+       *
+       * The cost of missing this is not a link error.  wifi_init() calls
+       * rf_module_vote_ctrl() inside libbk_phy.a, which loads g_rf_funcs_t
+       * out of .bss and branches through offset 16 of the NULL it finds:
+       * an instruction bus fault in closed code, six frames below anything
+       * we wrote, with the WiFi stack looking like the culprit.
+       *
+       * Guarded because a BLE-enabled image runs them at BLE bring-up and
+       * this would be the second time.
+       */
+
+      if (!phy_ready)
+        {
+          bk7258_phy_adapter_init();
+          bk7258_rf_adapter_init();
+          phy_ready = true;
+        }
+
+      ret = bk7258_wifi_vendor_init();
+
+      if (ret != 0)
+        {
+          nerr("ERROR: bk_wifi_init: %d\n", ret);
+          return -EIO;
+        }
+
+      ninfo("vendor WiFi stack initialised\n");
+      return OK;
+    }
+#else
+  nerr("ERROR: vendor WiFi sources not built (CONFIG_BK7258_WIFI_VENDOR)\n");
   return -ENOSYS;
+#endif
 }
 
 static int bk7258_wifi_ifdown(FAR struct netdev_lowerhalf_s *dev)
