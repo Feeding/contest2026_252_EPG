@@ -173,10 +173,14 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
    - ⚠️ **该压测是破坏性的**：`SECTORS_RANGE 0.95`，对整卡 95% 扇区写随机数据。它擦掉过一次原厂表情素材。跑任何带 stress 的用例前先读源码、先备份目标盘。
 
    **两个配置，别混用**：
-   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因、`/dev/oneshot0`）。flash 95.16%。
-   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app 腾空间。flash 77.51%。跑完必测把 `nsh` 烧回去。
+   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因、`/dev/oneshot0`）。flash 45.09%。
+   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app。flash 38.93%。跑完必测把 `nsh` 烧回去。
 
-   两者装不进同一个镜像：全塞进 `nsh` 会溢出到 102%。
+   **app 分区已扩到 3648 KB**（原 1728 KB），所以"装不下"不再是常态约束——两个配置现在都有一倍以上余量。扩的依据见 `scripts/ld.script` 顶部：bootloader 按名字查分区、只取 offset、**不读 size 也不校验镜像**（README 第九章反汇编实锤），所以镜像可以长过 app 分区；长过去覆盖的是 app1/app2（CPU1/CPU2 镜像，而 `start_cpu1_core()` 由 CPU0 应用代码调用、我们从不调，那两个核从未启动）和 download（OTA 暂存，本仓不做 OTA）。上限是 `usr_config`（0x3DA000），它和其上的 `rf_firmware`/`net_param`（出厂 RF 校准，BLE 依赖）**必须保留**。
+
+   已真机验证：造一个 2060 KB 的镜像（越过旧边界约 330 KB，打包后确实写进 app1 区域），板子正常启动、越界处的数据 XIP 读回正确、`crc_err_num=0`。注意**只造一个大镜像烧进去不算验证**——第一次尝试的填充数组被 `--gc-sections` 回收了，镜像根本没超限。
+
+   厂商分区表累加正好 4096 KB，是按 4 MB 型号画的，而本板是 8 MB：**上半部 4 MB 未分配**。它不能用来扩可执行镜像（bootloader 把 app 当作从 0x11000 起的一整块连续镜像），只能做数据——已给片内 flash MTD 用（`0x500000..0x7F0000`）。若要放只读大资源（模型权重、字体）可直接 XIP 寻址、不占 RAM，但要写 **CRC 编码后**的字节，且那片区域就不能再当原始 MTD 用（`crc_en` 是全局一位）。
 
    **已知补不上的一项**（原因见 PORTING_NOTES 十六章末）：1.3.16 RNG（**已跑通，但只能分批**）。
 
