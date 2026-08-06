@@ -1978,31 +1978,44 @@ putreg32((uint32_t)(now + step), CMP);
 - `flashtest` 留在树里：读控制器状态、指定地址转储、区间扫描、MTD 自检、复位原因、
   擦写计时。下次这块出问题，应该是几分钟而不是八轮。
 
-## 二十一、WiFi 可行性勘察：结论是"材料不全"，不是"工作量大"
+## 二十一、WiFi 可行性勘察：卡在两个没发布的头文件上
 
 本章记录为 STA + AP 适配 WiFi 的勘察全过程。**结论是当前两份厂商 SDK 都缺关键
 头文件，`components/bk_wifi/` 无法编译**——这不是工期问题，是材料问题，需要向
 博通/声网索要。下面把所有量到的数字和判断依据留下，免得下次重走。
 
-### 先说结论：缺什么
+### 先说结论：缺两个头文件
 
-`struct vif_info_tag` —— WiFi 驱动的 VIF（虚拟接口）表元素类型。闭源库里
-`vif_info_tab` 是 **0xa50 = 2640 字节**的全局数组（`nm -S libwifi.a` 实测），开源侧
-`rwnx_rx.c` / `rw_msg_rx.c` / `rwnx_misc.c` / `rw_tx_buffering.c` 到处以
-`&vif_info_tab[i]`、`struct vif_info_tag *` 使用它。
+`components/bk_wifi/src/*.c` 逐个核对 include，**缺且仅缺两个**：
 
-**这个结构体在 `bk_idk` 和 `bk_avdk_smp` 两份 SDK 的全部头文件里都不存在**——只在
-`.c` 里被使用，没有任何 `.h` 定义它。同类缺失还有 `ps.h`、`sm_task.h`。
+```
+sm_task.h    —— struct vif_info_tag 等内部结构体的完整定义
+ps.h         —— 低功耗状态机
+```
 
-所以 `components/bk_wifi/` 源码可见但**不自足**，等价于不可编译。要么拿到完整头
-文件，要么换一份带全的 SDK 发布。从二进制反推 2640 字节结构体的布局理论可行但
-不建议：一个字段错位就是静默内存损坏，代价参考十九、二十章。
+`bk_idk` 和 `bk_avdk_smp` 两份 SDK 全盘 `find` 都没有。其余 include 全部齐备。
+
+厂商对外只暴露不透明指针——`components/bk_wifi/include/bk_private/bk_rw.h:230` 是
+`typedef void *VIF_INF_PTR;`，公开头里的接口一律用它。但 `.c` 里做的是
+`struct vif_info_tag *vif = &vif_info_tab[vif_idx]` 然后 `vif->type`，**需要完整
+定义**，而定义在没发布的 `sm_task.h` 里。
+
+参照物：闭源库里 `vif_info_tab` 是 **0xa50 = 2640 字节**的全局数组
+（`nm -S libwifi.a` 实测），可用来校验拿到的定义对不对。
+
+所以 `components/bk_wifi/` 源码可见但**不自足**，等价于不可编译。两个文件都是
+Beken 内部普通头文件，而且是成对缺失（都属内部头），看起来像发布时按目录剥离，
+不像随机遗漏。
+
+从二进制反推 2640 字节结构体的布局理论可行但不建议：一个字段错位就是静默内存
+损坏，代价参考十九、二十章。
 
 ### 材料清单（索要时可直接引用）
 
-- `struct vif_info_tag` 定义（含其嵌套类型）
-- `ps.h`、`sm_task.h`
-- 闭源库编译时的完整 `sdkconfig.h`（见下"ABI 风险"一节）
+> 请提供 `components/bk_wifi/src` 编译所需的两个头文件：**`sm_task.h`** 和
+> **`ps.h`**（SDK 发布中缺失，`.c` 文件直接 `#include` 它们）。
+
+另建议一并索要闭源库编译时的完整 `sdkconfig.h`（见下"ABI 风险"一节）。
 
 ### 已经量清楚的部分（拿到头文件后可直接用）
 
