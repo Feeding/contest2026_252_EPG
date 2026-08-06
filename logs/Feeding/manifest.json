@@ -95,14 +95,14 @@
       "session_id": "ace6c4a7-3404-4be7-a107-2faa3dc7db48",
       "tool": "claude-code",
       "started_at": "2026-08-03T13:57:47.077Z",
-      "last_event_at": "2026-08-06T04:00:10.064Z",
-      "event_count": 158,
-      "raw_event_count": 5260,
+      "last_event_at": "2026-08-06T08:25:05.781Z",
+      "event_count": 443,
+      "raw_event_count": 5690,
       "file_path": "logs/Feeding/2026-08-06/claude-code__ace6c4a7-3404-4be7-a107-2faa3dc7db48.jsonl",
       "collection_mode": "cli",
       "health": "ok",
       "model": "claude-opus-5"
     }
   ],
-  "updated_at": "2026-08-06T08:03:53.945716+00:00"
+  "updated_at": "2026-08-06T09:54:52.632430+00:00"
 }
