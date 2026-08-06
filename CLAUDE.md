@@ -196,6 +196,12 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    这块的三个坑都会**静默失败**，动它之前先看文件头注释：① 计数时钟要靠写 `global_ctrl` 的 `soft_reset` 才启动，只开系统控制器那边的门控不够——不写这一位，通道使能了、终值装了，读回恒零且握手永不完成，而 `dev_id` 照样读出 `"TIMR"`、寄存器照样存得住值；② 没有独立中断使能位，`timerN_int_en` 是读回即状态、写 1 清除；③ 清中断必须自旋到读回为 0（跨 26 MHz 时钟域），否则处理函数立即重入。诊断工具 `timertest` 留在树里（读三个时钟位 + 握手是否超时 + 计数增量，四个实验一次跑完）。
 
+   **WiFi 目前被材料卡住，不是工作量问题**（完整勘察见 PORTING_NOTES 二十一章）：`struct vif_info_tag`（VIF 表元素类型，闭源库里 `vif_info_tab` 是 2640 字节全局数组）**在 `bk_idk` 和 `bk_avdk_smp` 两份 SDK 的全部头文件里都不存在**，只在 `.c` 里被使用；同类缺失还有 `ps.h`、`sm_task.h`。所以 `components/bk_wifi/` 源码可见但不自足，**编译不了**。要向厂商索要的清单在二十一章开头。
+
+   已量清楚的部分：闭源库外部依赖只有 79 个符号，且厂商预留了函数指针表 `wifi_os_funcs_t`（204 项）作为移植接缝，**不需要改厂商源码**；其中 26 项（含 `calibration_init`）直接在 `libbk_phy.a` 里转发即可，真正要设计的只有 25 项报文路径。但 supplicant 是硬依赖且接口是厂商私有的（openvela 没有 wpa_supplicant，且 `bk_wifi` 不走标准 `wpa_driver_ops`），要一并搬 150 个 .c / 171.6k 行。
+
+   ⚠️ 拿到头文件后动手前先读二十一章的"ABI 风险"一节：`CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 等两三个配置项必须与闭源库编译时一致，**照 Kconfig 默认值填会静默内存损坏**。
+
    RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章）。注意 1.3.15 看门狗用例还要求**咬狗后复位原因报 `BOARDIOC_RESETCAUSE_SYS_RWDT`**，`src/bk7258_reset.c` 已实现读回路径，但该映射**未上板验证**。
 
    RTC 有两条限制要知道：计数器不跨复位，墙钟时间掉电或重启即丢（`havesettime()` 如实返回 false）；AON 计数率是启动时实测判定的（这块板子是 32000 Hz 内部 ROSC，不是 32768 晶振），改动 `bk7258_rtc.c` 时别把它换成编译期常量。

@@ -1977,3 +1977,112 @@ putreg32((uint32_t)(now + step), CMP);
   引偏过一次。
 - `flashtest` 留在树里：读控制器状态、指定地址转储、区间扫描、MTD 自检、复位原因、
   擦写计时。下次这块出问题，应该是几分钟而不是八轮。
+
+## 二十一、WiFi 可行性勘察：结论是"材料不全"，不是"工作量大"
+
+本章记录为 STA + AP 适配 WiFi 的勘察全过程。**结论是当前两份厂商 SDK 都缺关键
+头文件，`components/bk_wifi/` 无法编译**——这不是工期问题，是材料问题，需要向
+博通/声网索要。下面把所有量到的数字和判断依据留下，免得下次重走。
+
+### 先说结论：缺什么
+
+`struct vif_info_tag` —— WiFi 驱动的 VIF（虚拟接口）表元素类型。闭源库里
+`vif_info_tab` 是 **0xa50 = 2640 字节**的全局数组（`nm -S libwifi.a` 实测），开源侧
+`rwnx_rx.c` / `rw_msg_rx.c` / `rwnx_misc.c` / `rw_tx_buffering.c` 到处以
+`&vif_info_tab[i]`、`struct vif_info_tag *` 使用它。
+
+**这个结构体在 `bk_idk` 和 `bk_avdk_smp` 两份 SDK 的全部头文件里都不存在**——只在
+`.c` 里被使用，没有任何 `.h` 定义它。同类缺失还有 `ps.h`、`sm_task.h`。
+
+所以 `components/bk_wifi/` 源码可见但**不自足**，等价于不可编译。要么拿到完整头
+文件，要么换一份带全的 SDK 发布。从二进制反推 2640 字节结构体的布局理论可行但
+不建议：一个字段错位就是静默内存损坏，代价参考十九、二十章。
+
+### 材料清单（索要时可直接引用）
+
+- `struct vif_info_tag` 定义（含其嵌套类型）
+- `ps.h`、`sm_task.h`
+- 闭源库编译时的完整 `sdkconfig.h`（见下"ABI 风险"一节）
+
+### 已经量清楚的部分（拿到头文件后可直接用）
+
+**闭源库的依赖面很小。** `libwifi.a` 5.4 MB，774 个未定义符号；把厂商几个库
+（`libwifi` / `libcom_phy` / `libbk_phy` / `libwifi_csi` / `libble_wifi_exchange`）
+放在一起，它们自身提供 2170 个定义，**真正要外部提供的只剩 79 个**。
+
+**厂商预留了完整的移植接缝。** 闭源库所有对外依赖都走一张函数指针表
+`wifi_os_funcs_t`（`components/bk_wifi/include/generated/lmac_wifi_adapter.h`），
+初始化时 `g_wifi_funcs = config->os_funcs` 注入。**所以移植不需要改厂商源码，
+只需实现我们自己的适配表**，不用维护分叉。
+
+表的构成（204 个函数指针）：
+
+| 类别 | 数量 | 依据 |
+| --- | --- | --- |
+| RTOS / 内存 → NuttX 原语 | 57 | `chip/bk7258_bt_osi.c`（2129 行）有现成模式 |
+| 芯片寄存器 / 时钟 / 电源 | 36 | 本仓 `sys_` / `gpio` / `dma` 已落地 |
+| 转发闭源库 | 26 | 含 `calibration_init`；照 `phy_osi.c` 里 `rwnx_cal_mac_sleep_rc_recover` 的写法 |
+| 电源管理（首版可空实现） | 17 | 按"不睡眠" |
+| 功能开关 / 常量 / 日志 | 24 | 固定值 |
+| **netdev + IOB 报文路径** | **25** | ← 唯一需要设计的部分 |
+
+`wifi_os_variable_t` 是 **70 个标量字段**（不是结构体布局约定），取值是厂商具名宏，
+集中在 `include/modules/pm.h`、`components/bk_ps/include/bk_ps.h`、
+`middleware/driver/sys_ctrl/sys_driver.h` 等纯 `#define` 头里，抽出来即可。
+
+**工作量标尺**：`chip/bk7258_phy_osi.c` 已经是 121 项、2368 行，是同一类工作。
+WiFi 表 204 项，量级约 1.7 倍。
+
+### supplicant 是硬依赖，且不能借用现成的
+
+- **openvela 里没有 wpa_supplicant**（只有 `iwpan` / `sixlowpan`，与 WiFi 无关）
+- `bk_wifi` 与 supplicant 的接口是**厂商私有**的（`wpa_get_bss_info`、
+  `wpa_send_assoc_req`、`wpa_hostapd_*`、`hostapd_intf`），**不是标准
+  `wpa_driver_ops`**——所以换一份标准 supplicant 也接不上
+- 闭源 `libwifi.a` 本身不依赖 supplicant（符号交集为空），依赖它的是开源胶水层
+
+厂商 `components/wpa_supplicant-2.10/` 实际编译 **150 个 .c、171,584 行**。它是可移植
+的用户态代码（标准 wpa_supplicant 本来就跑在各种 RTOS 上），风险低于驱动层，但
+体量必须计入。
+
+总量：约 197k 行厂商代码（`bk_wifi` 25.6k + supplicant 171.6k）+ 适配表。
+
+### ABI 风险：三个配置项必须与闭源库一致
+
+`bk_wifi` 引用 150 个 `CONFIG_*`，闭源库自带的 `sdkconfig.h`（174 行）只提供 169 个，
+**缺 119 个**。分类后：
+
+- **74 个纯编译开关**——只出现在 `#ifdef` 里，决定开源侧代码取舍，按需设
+- **45 个"数值使用"**——多数是布尔量和任务栈/优先级（仅运行期）
+
+真正跨闭源边界、**取错会静默内存损坏**的只有两三个：
+
+- `CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` → `CFG_STA_MAX` → `NX_REMOTE_STA_MAX`，
+  用于 `MAX_BUFING_CLIENT_NUM`、`NX_HEAP_SIZE` 和索引边界检查
+  （`sta_idx >= NX_REMOTE_STA_MAX`），而 STA 管理表在闭源库里（`sta_mgmt.c.obj`）
+- `CONFIG_MSDU_RESV_HEAD_LEN` / `_LENGTH`——报文缓冲预留头长度
+
+**不要照 Kconfig 的 `default 2` 填**：那是"没人改时的值"，不是"库实际用了什么"的
+证据。十九章的教训正是如此——NMI 看门狗的计数率按一个看似合理的推导硬编码成
+2 kHz，实测是 16 kHz，那个"8 秒"看门狗一直是 1 秒的。正确做法是拿到库编译时的
+完整 `sdkconfig.h`，或从库符号尺寸反推。
+
+### 勘察过程中我自己下错的三个判断
+
+留档是为了说明"看一眼就下结论"的代价，这三条都是中途被自己的后续测量推翻的：
+
+1. **"驱动绑死 lwIP，要么搬 lwIP 要么维护 25k 行分叉"**——错。看到头文件里有
+   `pbuf.h` 就下了结论。实际驱动自带 `pbuf.c`（60 行），且访问全部经过
+   `bk_wifi_adapter.c` 的 `*_wrapper` 间接层，正是为移植预留的。
+2. **"RF 校准是最大风险"**——错。`calibration_init` 等 26 项**就在 `libbk_phy.a`
+   里**，转发即可，不用自己写。
+3. **"`wifi_os_variable_t` 有 285 个字段，可能藏结构体布局约定"**——错，是 **70 个**
+   标量。285 是用分号数跨错了范围数出来的，报之前没核实。
+
+第 3 条尤其典型：**数字也要核实**，不是只有结论需要。
+
+### 顺带确认的一件好事
+
+`chip/bk7258_phy_osi.c` 里已经有 RF 仲裁表 `g_rf_control_funcs`，而且代码里有成对的
+`phy_osi_wifi_*` / `phy_osi_no_wifi_*` 分支——当初做 BLE 时就按"WiFi 未接入"留了
+口子。BLE 与 WiFi 共用 `libbk_phy`，共存所需的仲裁骨架已经在了。
