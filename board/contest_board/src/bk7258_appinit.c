@@ -64,6 +64,9 @@
 #  include <nuttx/mtd/mtd.h>
 #  include "bk7258_flash.h"
 #endif
+#ifdef CONFIG_BK7258_WIFI
+#  include "bk7258_wifi.h"
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -170,6 +173,14 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: bk7258_wdt_lowerhalf_initialize: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_BK7258_WIFI
+  ret = bk7258_wifi_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: bk7258_wifi_initialize: %d\n", ret);
     }
 #endif
 

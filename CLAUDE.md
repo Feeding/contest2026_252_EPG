@@ -200,6 +200,8 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    已量清楚的部分：闭源库外部依赖只有 79 个符号，且厂商预留了函数指针表 `wifi_os_funcs_t`（204 项）作为移植接缝，**不需要改厂商源码**；其中 26 项（含 `calibration_init`）直接在 `libbk_phy.a` 里转发即可，真正要设计的只有 25 项报文路径。但 supplicant 是硬依赖且接口是厂商私有的（openvela 没有 wpa_supplicant，且 `bk_wifi` 不走标准 `wpa_driver_ops`），要一并搬 150 个 .c / 171.6k 行。
 
+   **openvela 侧那一半已完成并真机验证**：`chip/bk7258_wifi.c`（`CONFIG_BK7258_WIFI`）注册 `wlan0`，`netdev_ops_s` + `wireless_ops_s` 两张表齐全；`essid`/`bssid`/`passwd`/`mode`/`auth` 是真实现（`wapi` 现在就能跑），`ifup`/收发/射频参数返回 `-ENOSYS` 等厂商栈。**注意 `CONFIG_DRIVERS_IEEE80211` 必须开**——官方网络驱动指南没提它，不开则 `netdev_register()` 里 `case NET_LL_IEEE80211` 被 `#ifdef` 编掉、返回 `-EINVAL`。另外指南有两处与代码不符：`netpkt_setdatalen()` 实际返回 `int`，且**不存在** `netdev_lower_quota_set()`（配额直接赋值 `dev->quota[]`）。
+
    ⚠️ 拿到头文件后动手前先读二十一章的"ABI 风险"一节：`CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 等两三个配置项必须与闭源库编译时一致，**照 Kconfig 默认值填会静默内存损坏**。
 
    RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章）。注意 1.3.15 看门狗用例还要求**咬狗后复位原因报 `BOARDIOC_RESETCAUSE_SYS_RWDT`**，`src/bk7258_reset.c` 已实现读回路径，但该映射**未上板验证**。

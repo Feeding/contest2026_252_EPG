@@ -1996,9 +1996,25 @@ ps.h         —— 低功耗状态机
 `bk_idk`、`bk_avdk_smp`，以及**从 GitHub 拉的官方 `bekencorp/bk_avdk_smp`
 `release/v3.1.1.8`**，三份全盘 `find` 都没有。其余 include 全部齐备。
 
-**这不是某一份发布的疏漏，是博通公开渠道就不提供。** 一开始的推断是"`bk_idk` 是
-声网定制裁剪版，官方版应该带全"，拉下来比对后推翻了：官方最新版同样没有这两个头，
-`components/bk_ps/` 同样是**只有头文件、零个 `.c`**（实现在闭源库里）。
+**这不是某一份发布的疏漏，是博通公开渠道就不提供。**
+
+一开始的推断是"`bk_idk` 是声网定制裁剪版，官方版应该带全"。**这个推断是凭空下的**
+——查 `git remote` 就知道 `bk_idk` 的远端就是 `bekencorp/bk_idk`，`bk_avdk_smp` 是
+`bekencorp/bk_avdk_smp`，**两份都是博通官方仓库**，只是产品线不同（v2.0.1 与
+v3.1.1）。
+
+实测结果反而更强：**两条官方产品线、跨 v2.0 到 v3.1，都没有这两个头**，
+`components/bk_ps/` 都是只有头文件、零个 `.c`（实现在闭源库里），
+`git log --all -- "*/sm_task.h" "*/ps.h"` 在两边都是空的——**这两个文件从未进入过
+公开仓库**，不是某次提交删掉的。`.gitignore` 也没有排除它们，
+`bk_wifi/scripts/` 下唯一的脚本只**检查** `include/generated/` 有无未提交改动、
+不生成任何东西。
+
+> 中途还有一次比对是**无效**的，记在这里因为教训通用：当时把官方 SDK 下到
+> `bk_armino_official`，而那个目录后来不存在，比对命令又都带 `2>/dev/null`，
+> 把 "No such file or directory" 吞成了空输出——**空输出被读成"文件不存在"**。
+> 结论碰巧对，但当时没有证据。判据必须对两种情况给出不同结果，否则取证和猜想
+> 一样不可靠（同类错误见本章末与二十章）。
 
 由此得到一个更硬的结论：`bk_wifi/CMakeLists.txt` 把 `rwnx_misc.c` 列进无条件编译
 清单，而它 `#include "sm_task.h"`——**公开 SDK 自己就编不过 WiFi 组件**，厂商内部
@@ -2112,3 +2128,43 @@ WiFi 表 204 项，量级约 1.7 倍。
 `chip/bk7258_phy_osi.c` 里已经有 RF 仲裁表 `g_rf_control_funcs`，而且代码里有成对的
 `phy_osi_wifi_*` / `phy_osi_no_wifi_*` 分支——当初做 BLE 时就按"WiFi 未接入"留了
 口子。BLE 与 WiFi 共用 `libbk_phy`，共存所需的仲裁骨架已经在了。
+
+### openvela 侧那一半已经做完了（可用，真机验证）
+
+厂商那半在等头文件，但 openvela 规定的那半不依赖它，已经写完并上板验证：
+`chip/bk7258_wifi.c` 注册 `wlan0`，`ifconfig` 能看到。
+
+```
+wlan0  Link encap:Ethernet  HWaddr 00:00:00:00:00:00  at DOWN  mtu 576
+```
+
+依据是官方 [网络驱动适配指南](../../../docs/zh-cn/device_dev_guide/connection/network/driver/net_driver_guide.md)
+与树里的完整范例 `nuttx/drivers/net/wifi_sim.c`（2040 行）。要实现的就两张表：
+
+- `netdev_ops_s` —— `ifup` / `ifdown` / `transmit` / `receive`
+- `wireless_ops_s` —— 14 个 handler
+
+**这里有个架构判断值得记，因为它和 Linux 背景的直觉相反**：`wireless_ops_s` 里带
+`essid` / `passwd` / `auth`，与 `connect` 并列——**关联和安全握手属于驱动**，
+openvela 不期待一个独立的 supplicant 进程去喂。厂商 supplicant 是链进镜像、由驱动
+从下面驱动的。所以本章前面"要把 150 个文件 171.6k 行的 supplicant 当独立组件移植"
+那个估计**基于错误的架构假设**，实际 openvela 侧不需要对接它。
+
+已经能工作的：`essid` / `bssid` / `passwd` / `mode` / `auth` 五个关联参数是真实现，
+不依赖厂商栈，`wapi` 命令行现在就能对着驱动跑。`passwd` 只接受不回读——把密钥交给
+任何来问的调用者不是驱动该做的事。MAC 地址保持全零：真实地址要从芯片读，编一个
+像模像样的假地址只会让人误以为它能用。
+
+返回 `-ENOSYS` 的：`ifup`、收发、以及频率 / 速率 / 功率 / 国家码 / 灵敏度 / 扫描
+——这些要碰 MAC/PHY 寄存器。
+
+**三个照文档做会踩的坑：**
+
+1. **`CONFIG_DRIVERS_IEEE80211` 必须开，而指南没提。** 没开时
+   `netdev_register()` 里的 `case NET_LL_IEEE80211:` 被 `#ifdef` 整个编掉，落到
+   default 返回 `-EINVAL`，现象是 `bk7258_wifi_initialize: -22`、`ifconfig` 空白。
+   指南只列了 `NETDEVICES` / `NETDEV_IOCTL` / `NETDEV_WIRELESS_HANDLER`。
+2. **`netpkt_setdatalen()` 返回 `int`，指南写的是 `void`。**
+3. **没有 `netdev_lower_quota_set()` 这个函数**——配额是直接赋值
+   `dev->quota[NETPKT_TX] = N`（照 `nuttx/drivers/net/e1000.c`）。这一条是我按印象
+   写的 API，链接期才暴露：**接口以树里的真实驱动为准，文档会滞后。**
