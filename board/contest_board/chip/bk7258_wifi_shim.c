@@ -166,6 +166,39 @@ static uint32_t g_bk7258_wifi_rx_frames;
 static uint32_t g_bk7258_wifi_rx_bytes;
 
 /****************************************************************************
+ * Temporary: fault probe
+ *
+ * NuttX leaves BusFault and UsageFault disabled, so they escalate to Hard
+ * Fault and the interrupted context is lost by the time _assert() prints --
+ * every dump so far has shown _assert's own PC.  Enabling them and
+ * attaching here keeps the exception unescalated, and the handler's
+ * "context" argument IS the saved register frame, so REG_PC is the
+ * instruction that actually faulted.
+ ****************************************************************************/
+
+static int bk7258_fault_probe(int irq, FAR void *context, FAR void *arg)
+{
+  FAR uint32_t *regs = (FAR uint32_t *)context;
+
+  UNUSED(arg);
+
+  syslog(LOG_ERR, "FAULT irq=%d PC=%08" PRIx32 " LR=%08" PRIx32
+                  " CFSR=%08" PRIx32 " BFAR=%08" PRIx32 "\n",
+         irq, regs[REG_PC], regs[REG_LR],
+         getreg32(0xe000ed28), getreg32(0xe000ed38));
+
+  PANIC();
+  return OK;
+}
+
+void bk7258_wifi_fault_probe_install(void)
+{
+  irq_attach(5, bk7258_fault_probe, NULL);   /* BusFault   */
+  irq_attach(6, bk7258_fault_probe, NULL);   /* UsageFault */
+  modifyreg32(0xe000ed24, 0, (1u << 17) | (1u << 18));
+}
+
+/****************************************************************************
  * Public Functions -- REAL: SoC interrupt routing
  ****************************************************************************/
 

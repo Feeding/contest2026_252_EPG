@@ -3,25 +3,23 @@
  *
  * WiFi network device for the BK7258 -- the openvela-facing half.
  *
- * This is deliberately only one half of the driver, and it is worth being
- * explicit about why, because the file does not work yet and should not be
- * mistaken for something that does.
+ * This file is the netdev lower half: it registers wlan0 and answers the
+ * wireless ioctls.  The vendor MAC stack lives beside it, compiled from
+ * bk_idk with the vendor's own flags (bk7258_wifi_vendor.cmake) and driven
+ * from ifup() below.
  *
- * The vendor stack cannot be compiled from any published SDK.  Two internal
- * headers, sm_task.h and ps.h, are absent from bekencorp/bk_idk (v2.0.1) and
- * bekencorp/bk_avdk_smp (v3.1.1) alike, and have never appeared in either
- * repository's history; the definition of struct vif_info_tag lives in one of
- * them and four files in components/bk_wifi/src index vif_info_tab, so they
- * cannot build without it.  Beken's own published tree therefore cannot build
- * its own WiFi component.  PORTING_NOTES chapter 21 has the measurements and
- * the list to ask them for.
+ * An earlier version of this comment claimed the vendor stack could not be
+ * compiled at all -- that two internal headers, sm_task.h and ps.h, were
+ * missing from every published SDK.  That was wrong, and the way it was
+ * wrong is worth keeping: both #includes sit inside
+ * "#if NX_VERSION > NX_VERSION_PACK(6,22,0,0)", and this tree is 6.8.2.0,
+ * so the preprocessor never reaches them.  The conclusion came from
+ * grepping for the include lines without checking what guarded them.  All
+ * 33 sources in components/bk_wifi/src compile as published.
  *
- * What that leaves is the half openvela specifies, which is small, well
- * documented (docs/zh-cn/device_dev_guide/connection/network/driver/
- * net_driver_guide.md) and has a complete worked example in
- * nuttx/drivers/net/wifi_sim.c.  It is written now so that when the headers
- * arrive the remaining work is confined to the vendor calls behind
- * bk7258_wifi_lower_*, rather than starting from nothing.
+ * The openvela side follows
+ * docs/zh-cn/device_dev_guide/connection/network/driver/net_driver_guide.md,
+ * with a complete worked example in nuttx/drivers/net/wifi_sim.c.
  *
  * The shape openvela expects is worth stating, because it is not the one a
  * Linux background suggests: wireless_ops_s carries essid, passwd and auth
@@ -230,6 +228,9 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
 
       if (!phy_ready)
         {
+          extern void bk7258_wifi_fault_probe_install(void);
+          bk7258_wifi_fault_probe_install();
+
           bk7258_phy_adapter_init();
           bk7258_rf_adapter_init();
           phy_ready = true;

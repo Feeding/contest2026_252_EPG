@@ -196,13 +196,22 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    这块的三个坑都会**静默失败**，动它之前先看文件头注释：① 计数时钟要靠写 `global_ctrl` 的 `soft_reset` 才启动，只开系统控制器那边的门控不够——不写这一位，通道使能了、终值装了，读回恒零且握手永不完成，而 `dev_id` 照样读出 `"TIMR"`、寄存器照样存得住值；② 没有独立中断使能位，`timerN_int_en` 是读回即状态、写 1 清除；③ 清中断必须自旋到读回为 0（跨 26 MHz 时钟域），否则处理函数立即重入。诊断工具 `timertest` 留在树里（读三个时钟位 + 握手是否超时 + 计数增量，四个实验一次跑完）。
 
-   **WiFi 目前卡在两个没发布的头文件上**（完整勘察见 PORTING_NOTES 二十一章）：`components/bk_wifi/src/*.c` 逐个核对 include 后，**缺且仅缺 `sm_task.h` 和 `ps.h`**，三份 SDK 全盘 `find` 都没有（`bk_idk`、`bk_avdk_smp`、以及从 GitHub 拉的官方 `bekencorp/bk_avdk_smp` `release/v3.1.1.8`，留在 `/Users/apple/app/github.com/bk_armino_official`），其余 include 齐备。**这不是某份发布的疏漏，是博通公开渠道就不给**——官方版同样缺，且 `components/bk_ps/` 同样只有头文件零个 `.c`。也就是说公开 SDK 自己都编不过 WiFi 组件，只能向厂商索要。前者带 `struct vif_info_tag` 等内部结构体的完整定义——公开头 `bk_private/bk_rw.h:230` 只给 `typedef void *VIF_INF_PTR`，而 `.c` 里做 `vif->type` 字段访问，必须要完整定义。索要话术见二十一章开头（校验参照：闭源库里 `vif_info_tab` 是 2640 字节全局数组）。
+   **WiFi:厂商 MAC 已链入并能在板上跑到 `mm_init`**（详见 PORTING_NOTES 二十一章）。
 
-   已量清楚的部分：闭源库外部依赖只有 79 个符号，且厂商预留了函数指针表 `wifi_os_funcs_t`（204 项）作为移植接缝，**不需要改厂商源码**；其中 26 项（含 `calibration_init`）直接在 `libbk_phy.a` 里转发即可，真正要设计的只有 25 项报文路径。但 supplicant 是硬依赖且接口是厂商私有的（openvela 没有 wpa_supplicant，且 `bk_wifi` 不走标准 `wpa_driver_ops`），要一并搬 150 个 .c / 171.6k 行。
+   ⚠️ **此前"卡在 `sm_task.h` / `ps.h` 两个没发布头文件"的结论是错的,已撤回。** 那两个 `#include` 都在 `#if NX_VERSION > NX_VERSION_PACK(6,22,0,0)` 里,而本树是 6.8.2.0,预处理器根本走不到。错因是 grep 到 include 行就下结论、没看它被什么守着。`components/bk_wifi/src` 的 **33 个源文件按发布原样全部编过**,不需要向厂商索要任何东西。同批被推翻的还有"`bk_idk` 是声网定制裁剪版"(`git remote` 是 `bekencorp/bk_idk`,两份 SDK 都是官方版)。
 
-   **openvela 侧那一半已完成并真机验证**：`chip/bk7258_wifi.c`（`CONFIG_BK7258_WIFI`）注册 `wlan0`，`netdev_ops_s` + `wireless_ops_s` 两张表齐全；`essid`/`bssid`/`passwd`/`mode`/`auth` 是真实现（`wapi` 现在就能跑），`ifup`/收发/射频参数返回 `-ENOSYS` 等厂商栈。**注意 `CONFIG_DRIVERS_IEEE80211` 必须开**——官方网络驱动指南没提它，不开则 `netdev_register()` 里 `case NET_LL_IEEE80211` 被 `#ifdef` 编掉、返回 `-EINVAL`。另外指南有两处与代码不符：`netpkt_setdatalen()` 实际返回 `int`，且**不存在** `netdev_lower_quota_set()`（配额直接赋值 `dev->quota[]`）。
+   **已上板验证**:`configs/xts` 里 `CONFIG_BK7258_WIFI` + `CONFIG_BK7258_WIFI_VENDOR` 打开后,控制台会打出闭源 MAC 自己的 `IP Rev: 802.11ax` 和 `mm_bcn_loss_info: ...`,随后在 `mm_init` 内部硬故障(`CFSR=0x01000000`,UsageFault 的 UNALIGNED 位)。**尚不能收发**。
 
-   ⚠️ 拿到头文件后动手前先读二十一章的"ABI 风险"一节：`CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 等两三个配置项必须与闭源库编译时一致，**照 Kconfig 默认值填会静默内存损坏**。
+   三个必须做对、做错都不报错的接缝(全部已实现,见 `chip/bk7258_wifi_shim.c` 头注释的 REAL/ADEQUATE/PENDING 分类):
+   - **`bk_wifi_init()` 带 config 参数**。手写 `extern int bk_wifi_init(void)` 能编能链,厂商那句专防此事的 `config->os_funcs == NULL` 检查会被寄存器残留值躲过,故障出现在三十层之后的闭源代码里。凡是厂商 API 一律用它自己的头,别凭记忆写原型。
+   - **`g_wifi_os_funcs`(211 项适配表)会被 `--gc-sections` 回收**——没有任何代码按名字引用它,闭源库也不引用。`WIFI_DEFAULT_INIT_CONFIG()` 宏引用它是唯一的存活理由。它活过来之后未定义符号从 44 涨到 99,那不是倒退,是真实集成面终于可见。
+   - **PHY/RF 适配器必须先注册**。`bk7258_phy_osi.c` 里的表是 BLE 时期就写好的,但只有 `bk7258_ble.c` 调初始化,而 xts 配置不含 BLE。不注册则 `libbk_phy.a` 的 `rf_open_handler` 从 `.bss` 取到 NULL 表、按偏移 16 跳转。现已在 `bk7258_wifi_ifup()` 里带幂等保护地调用。
+
+   两个极性陷阱(实现处有注释):电源寄存器 `0x44010040` 的位是**掉电位**,开电源要**清位**;电源子模块不是域,`PHY_WIFI = 201`,除以 `PM_MODULE_SUB_POWER_DOMAIN_MAX`(20)才得到 PHY 域号 10。
+
+   ⚠️ **`CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 那条 ABI 风险已排除**:实测 `g_wifi_mac_sta_max_num = 2`,与闭源库 `me_strategy_mem_init()` 的分配式 `2*568+1136` 一致,值来自 `sdkconfig.h`(在我们 `-I` 首条上),不需要手工对齐。
+
+   **openvela 侧那一半**:`chip/bk7258_wifi.c` 注册 `wlan0`,`netdev_ops_s` + `wireless_ops_s` 两张表齐全,`essid`/`bssid`/`passwd`/`mode`/`auth` 是真实现。**`CONFIG_DRIVERS_IEEE80211` 必须开**——官方网络驱动指南没提,不开则 `netdev_register()` 里 `case NET_LL_IEEE80211` 被编掉、返回 `-EINVAL`。指南另有两处与代码不符:`netpkt_setdatalen()` 实际返回 `int`,且**不存在** `netdev_lower_quota_set()`(配额直接赋值 `dev->quota[]`)。
 
    RTC 与 Watchdog 已补齐并真机验证（`/dev/rtc0` + `/dev/watchdog0`，见 PORTING_NOTES 十四章）。注意 1.3.15 看门狗用例还要求**咬狗后复位原因报 `BOARDIOC_RESETCAUSE_SYS_RWDT`**，`src/bk7258_reset.c` 已实现读回路径，但该映射**未上板验证**。
 

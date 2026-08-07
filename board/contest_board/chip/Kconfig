@@ -65,7 +65,7 @@ config BK7258_UART2
 		UART2 on GPIO40 (RX) / GPIO41 (TX), alternate GPIO30/GPIO31.
 
 config BK7258_WIFI
-	bool "WiFi network device (openvela half only)"
+	bool "WiFi network device"
 	default n
 	select NETDEVICES
 	select NETDEV_LATEINIT
@@ -78,19 +78,13 @@ config BK7258_WIFI
 		Register wlan0 as an 802.11 netdev lower half with wireless
 		extensions, per the openvela network driver guide.
 
-		**This cannot carry traffic yet, and enabling it does not make WiFi
-		work.**  The vendor MAC is not built: components/bk_wifi needs two
-		internal headers, sm_task.h and ps.h, which are absent from every
-		published Beken SDK -- bk_idk v2.0.1 and bk_avdk_smp v3.1.1 alike --
-		and have never been in either repository's history.  struct
-		vif_info_tag is defined in one of them and four files index
-		vif_info_tab, so Beken's own published tree cannot build its own
-		WiFi component either.
+		**This cannot carry traffic yet.**  Bring-up currently reaches
+		mm_init() inside the closed MAC and faults there; the association
+		parameters and the wireless ioctls are real, but there is no RX or
+		TX path behind them yet.
 
-		What this does give is the half openvela specifies, built and
-		registered, so that the remaining work is confined to the vendor
-		calls when the headers arrive.  ifup() and the radio parameters
-		answer -ENOSYS; the association parameters are real.
+		On its own this registers wlan0 and nothing more.  Turn on
+		BK7258_WIFI_VENDOR as well to build and drive Beken's MAC.
 
 		See PORTING_NOTES chapter 21.
 

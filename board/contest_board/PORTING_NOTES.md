@@ -1978,239 +1978,115 @@ putreg32((uint32_t)(now + step), CMP);
 - `flashtest` 留在树里：读控制器状态、指定地址转储、区间扫描、MTD 自检、复位原因、
   擦写计时。下次这块出问题，应该是几分钟而不是八轮。
 
-## 二十一、WiFi 可行性勘察：卡在两个没发布的头文件上
+## 二十一、WiFi：把厂商 MAC 接进来，以及一次代价高昂的误判
 
-本章记录为 STA + AP 适配 WiFi 的勘察全过程。**结论是当前两份厂商 SDK 都缺关键
-头文件，`components/bk_wifi/` 无法编译**——这不是工期问题，是材料问题，需要向
-博通/声网索要。下面把所有量到的数字和判断依据留下，免得下次重走。
+这一章要先撤回它自己的旧标题。
 
-### 先说结论：缺两个头文件
+### 撤回：「卡在两个没发布的头文件上」是错的
 
-`components/bk_wifi/src/*.c` 逐个核对 include，**缺且仅缺两个**：
+旧结论是：`components/bk_wifi/src/*.c` 缺 `sm_task.h` 和 `ps.h`，三份 SDK 全盘 `find` 都没有，所以公开 SDK 自己都编不过 WiFi 组件，只能向厂商索要。
 
-```
-sm_task.h    —— struct vif_info_tag 等内部结构体的完整定义
-ps.h         —— 低功耗状态机
-```
-
-`bk_idk`、`bk_avdk_smp`，以及**从 GitHub 拉的官方 `bekencorp/bk_avdk_smp`
-`release/v3.1.1.8`**，三份全盘 `find` 都没有。其余 include 全部齐备。
-
-**这不是某一份发布的疏漏，是博通公开渠道就不提供。**
-
-一开始的推断是"`bk_idk` 是声网定制裁剪版，官方版应该带全"。**这个推断是凭空下的**
-——查 `git remote` 就知道 `bk_idk` 的远端就是 `bekencorp/bk_idk`，`bk_avdk_smp` 是
-`bekencorp/bk_avdk_smp`，**两份都是博通官方仓库**，只是产品线不同（v2.0.1 与
-v3.1.1）。
-
-实测结果反而更强：**两条官方产品线、跨 v2.0 到 v3.1，都没有这两个头**，
-`components/bk_ps/` 都是只有头文件、零个 `.c`（实现在闭源库里），
-`git log --all -- "*/sm_task.h" "*/ps.h"` 在两边都是空的——**这两个文件从未进入过
-公开仓库**，不是某次提交删掉的。`.gitignore` 也没有排除它们，
-`bk_wifi/scripts/` 下唯一的脚本只**检查** `include/generated/` 有无未提交改动、
-不生成任何东西。
-
-> 中途还有一次比对是**无效**的，记在这里因为教训通用：当时把官方 SDK 下到
-> `bk_armino_official`，而那个目录后来不存在，比对命令又都带 `2>/dev/null`，
-> 把 "No such file or directory" 吞成了空输出——**空输出被读成"文件不存在"**。
-> 结论碰巧对，但当时没有证据。判据必须对两种情况给出不同结果，否则取证和猜想
-> 一样不可靠（同类错误见本章末与二十章）。
-
-由此得到一个更硬的结论：`bk_wifi/CMakeLists.txt` 把 `rwnx_misc.c` 列进无条件编译
-清单，而它 `#include "sm_task.h"`——**公开 SDK 自己就编不过 WiFi 组件**，厂商内部
-构建必然另有一套不外发的头文件。所以"换个版本就有"这条路是堵死的，只能索要。
-
-> 比对用的官方 SDK 留在 `/Users/apple/app/github.com/bk_armino_official`
-> （`release/v3.1.1.8`，`ap/` + `cp/` 双核结构，组件在 `cp/components/` 下）。
-> 注意闭源库仍须用 `bk_idk` 那份——BLE 是拿它的 `libbluetooth_*` 跑通的，
-> 库与头文件版本必须配套。
-
-厂商对外只暴露不透明指针——`components/bk_wifi/include/bk_private/bk_rw.h:230` 是
-`typedef void *VIF_INF_PTR;`，公开头里的接口一律用它。但 `.c` 里做的是
-`struct vif_info_tag *vif = &vif_info_tab[vif_idx]` 然后 `vif->type`，**需要完整
-定义**，而定义在没发布的 `sm_task.h` 里。
-
-参照物：闭源库里 `vif_info_tab` 是 **0xa50 = 2640 字节**的全局数组
-（`nm -S libwifi.a` 实测），可用来校验拿到的定义对不对。
-
-所以 `components/bk_wifi/` 源码可见但**不自足**，等价于不可编译。两个都是 Beken 内部头，成对缺失，且三份发布一致——
-不是遗漏，是既定的发布边界。
-
-从二进制反推 2640 字节结构体的布局理论可行但不建议：一个字段错位就是静默内存
-损坏，代价参考十九、二十章。
-
-### 材料清单（索要时可直接引用）
-
-> 请提供 `components/bk_wifi/src` 编译所需的两个头文件：**`sm_task.h`** 和
-> **`ps.h`**（SDK 发布中缺失，`.c` 文件直接 `#include` 它们）。
-
-另建议一并索要闭源库编译时的完整 `sdkconfig.h`（见下"ABI 风险"一节）。
-
-### 已经量清楚的部分（拿到头文件后可直接用）
-
-**闭源库的依赖面很小。** `libwifi.a` 5.4 MB，774 个未定义符号；把厂商几个库
-（`libwifi` / `libcom_phy` / `libbk_phy` / `libwifi_csi` / `libble_wifi_exchange`）
-放在一起，它们自身提供 2170 个定义，**真正要外部提供的只剩 79 个**。
-
-**厂商预留了完整的移植接缝。** 闭源库所有对外依赖都走一张函数指针表
-`wifi_os_funcs_t`（`components/bk_wifi/include/generated/lmac_wifi_adapter.h`），
-初始化时 `g_wifi_funcs = config->os_funcs` 注入。**所以移植不需要改厂商源码，
-只需实现我们自己的适配表**，不用维护分叉。
-
-表的构成（204 个函数指针）：
-
-| 类别 | 数量 | 依据 |
-| --- | --- | --- |
-| RTOS / 内存 → NuttX 原语 | 57 | `chip/bk7258_bt_osi.c`（2129 行）有现成模式 |
-| 芯片寄存器 / 时钟 / 电源 | 36 | 本仓 `sys_` / `gpio` / `dma` 已落地 |
-| 转发闭源库 | 26 | 含 `calibration_init`；照 `phy_osi.c` 里 `rwnx_cal_mac_sleep_rc_recover` 的写法 |
-| 电源管理（首版可空实现） | 17 | 按"不睡眠" |
-| 功能开关 / 常量 / 日志 | 24 | 固定值 |
-| **netdev + IOB 报文路径** | **25** | ← 唯一需要设计的部分 |
-
-`wifi_os_variable_t` 是 **70 个标量字段**（不是结构体布局约定），取值是厂商具名宏，
-集中在 `include/modules/pm.h`、`components/bk_ps/include/bk_ps.h`、
-`middleware/driver/sys_ctrl/sys_driver.h` 等纯 `#define` 头里，抽出来即可。
-
-**工作量标尺**：`chip/bk7258_phy_osi.c` 已经是 121 项、2368 行，是同一类工作。
-WiFi 表 204 项，量级约 1.7 倍。
-
-### supplicant 是硬依赖，且不能借用现成的
-
-- **openvela 里没有 wpa_supplicant**（只有 `iwpan` / `sixlowpan`，与 WiFi 无关）
-- `bk_wifi` 与 supplicant 的接口是**厂商私有**的（`wpa_get_bss_info`、
-  `wpa_send_assoc_req`、`wpa_hostapd_*`、`hostapd_intf`），**不是标准
-  `wpa_driver_ops`**——所以换一份标准 supplicant 也接不上
-- 闭源 `libwifi.a` 本身不依赖 supplicant（符号交集为空），依赖它的是开源胶水层
-
-厂商 `components/wpa_supplicant-2.10/` 实际编译 **150 个 .c、171,584 行**。它是可移植
-的用户态代码（标准 wpa_supplicant 本来就跑在各种 RTOS 上），风险低于驱动层，但
-体量必须计入。
-
-总量：约 197k 行厂商代码（`bk_wifi` 25.6k + supplicant 171.6k）+ 适配表。
-
-### ABI 风险：三个配置项必须与闭源库一致
-
-`bk_wifi` 引用 150 个 `CONFIG_*`，闭源库自带的 `sdkconfig.h`（174 行）只提供 169 个，
-**缺 119 个**。分类后：
-
-- **74 个纯编译开关**——只出现在 `#ifdef` 里，决定开源侧代码取舍，按需设
-- **45 个"数值使用"**——多数是布尔量和任务栈/优先级（仅运行期）
-
-真正跨闭源边界、**取错会静默内存损坏**的只有两三个：
-
-- `CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` → `CFG_STA_MAX` → `NX_REMOTE_STA_MAX`，
-  用于 `MAX_BUFING_CLIENT_NUM`、`NX_HEAP_SIZE` 和索引边界检查
-  （`sta_idx >= NX_REMOTE_STA_MAX`），而 STA 管理表在闭源库里（`sta_mgmt.c.obj`）
-- `CONFIG_MSDU_RESV_HEAD_LEN` / `_LENGTH`——报文缓冲预留头长度
-
-**不要照 Kconfig 的 `default 2` 填**：那是"没人改时的值"，不是"库实际用了什么"的
-证据。十九章的教训正是如此——NMI 看门狗的计数率按一个看似合理的推导硬编码成
-2 kHz，实测是 16 kHz，那个"8 秒"看门狗一直是 1 秒的。正确做法是拿到库编译时的
-完整 `sdkconfig.h`，或从库符号尺寸反推。
-
-### 勘察过程中我自己下错的三个判断
-
-留档是为了说明"看一眼就下结论"的代价，这三条都是中途被自己的后续测量推翻的：
-
-1. **"驱动绑死 lwIP，要么搬 lwIP 要么维护 25k 行分叉"**——错。看到头文件里有
-   `pbuf.h` 就下了结论。实际驱动自带 `pbuf.c`（60 行），且访问全部经过
-   `bk_wifi_adapter.c` 的 `*_wrapper` 间接层，正是为移植预留的。
-2. **"RF 校准是最大风险"**——错。`calibration_init` 等 26 项**就在 `libbk_phy.a`
-   里**，转发即可，不用自己写。
-3. **"`wifi_os_variable_t` 有 285 个字段，可能藏结构体布局约定"**——错，是 **70 个**
-   标量。285 是用分号数跨错了范围数出来的，报之前没核实。
-
-第 3 条尤其典型：**数字也要核实**，不是只有结论需要。
-
-### 顺带确认的一件好事
-
-`chip/bk7258_phy_osi.c` 里已经有 RF 仲裁表 `g_rf_control_funcs`，而且代码里有成对的
-`phy_osi_wifi_*` / `phy_osi_no_wifi_*` 分支——当初做 BLE 时就按"WiFi 未接入"留了
-口子。BLE 与 WiFi 共用 `libbk_phy`，共存所需的仲裁骨架已经在了。
-
-### openvela 侧那一半已经做完了（可用，真机验证）
-
-厂商那半在等头文件，但 openvela 规定的那半不依赖它，已经写完并上板验证：
-`chip/bk7258_wifi.c` 注册 `wlan0`，`ifconfig` 能看到。
-
-```
-wlan0  Link encap:Ethernet  HWaddr 00:00:00:00:00:00  at DOWN  mtu 576
-```
-
-依据是官方 [网络驱动适配指南](../../../docs/zh-cn/device_dev_guide/connection/network/driver/net_driver_guide.md)
-与树里的完整范例 `nuttx/drivers/net/wifi_sim.c`（2040 行）。要实现的就两张表：
-
-- `netdev_ops_s` —— `ifup` / `ifdown` / `transmit` / `receive`
-- `wireless_ops_s` —— 14 个 handler
-
-**这里有个架构判断值得记，因为它和 Linux 背景的直觉相反**：`wireless_ops_s` 里带
-`essid` / `passwd` / `auth`，与 `connect` 并列——**关联和安全握手属于驱动**，
-openvela 不期待一个独立的 supplicant 进程去喂。厂商 supplicant 是链进镜像、由驱动
-从下面驱动的。所以本章前面"要把 150 个文件 171.6k 行的 supplicant 当独立组件移植"
-那个估计**基于错误的架构假设**，实际 openvela 侧不需要对接它。
-
-已经能工作的：`essid` / `bssid` / `passwd` / `mode` / `auth` 五个关联参数是真实现，
-不依赖厂商栈，`wapi` 命令行现在就能对着驱动跑。`passwd` 只接受不回读——把密钥交给
-任何来问的调用者不是驱动该做的事。MAC 地址保持全零：真实地址要从芯片读，编一个
-像模像样的假地址只会让人误以为它能用。
-
-返回 `-ENOSYS` 的：`ifup`、收发、以及频率 / 速率 / 功率 / 国家码 / 灵敏度 / 扫描
-——这些要碰 MAC/PHY 寄存器。
-
-**三个照文档做会踩的坑：**
-
-1. **`CONFIG_DRIVERS_IEEE80211` 必须开，而指南没提。** 没开时
-   `netdev_register()` 里的 `case NET_LL_IEEE80211:` 被 `#ifdef` 整个编掉，落到
-   default 返回 `-EINVAL`，现象是 `bk7258_wifi_initialize: -22`、`ifconfig` 空白。
-   指南只列了 `NETDEVICES` / `NETDEV_IOCTL` / `NETDEV_WIRELESS_HANDLER`。
-2. **`netpkt_setdatalen()` 返回 `int`，指南写的是 `void`。**
-3. **没有 `netdev_lower_quota_set()` 这个函数**——配额是直接赋值
-   `dev->quota[NETPKT_TX] = N`（照 `nuttx/drivers/net/e1000.c`）。这一条是我按印象
-   写的 API，链接期才暴露：**接口以树里的真实驱动为准，文档会滞后。**
-
-### 接缝在哪：厂商有一层干净的公开 API（这改了工作量估计）
-
-`bk_idk/projects/wifi/` 下有 11 个示例工程（`sta_connect`、`softap`、`scan`、
-`iperf`、`wapi`…）。看 `sta_connect/main/sta_connect_main.c` 才发现，**应用侧根本
-不碰 `bk_wifi/src` 的内部**，只 include 三个公开头：
+**这是错的。** 那两个 `#include` 都写在
 
 ```c
-#include <modules/wifi.h>       /* bk_wifi_init / sta_set_config / sta_start / scan_start */
-#include <components/netif.h>   /* bk_netif_init */
-#include <components/event.h>   /* EVENT_WIFI_STA_CONNECTED / EVENT_NETIF_GOT_IP4 */
+#if NX_VERSION > NX_VERSION_PACK(6, 22, 0, 0)
+#include "sm_task.h"
+#include "ps.h"
+#endif
 ```
 
-STA 全流程就是：填 `wifi_sta_config_t` → `bk_wifi_sta_set_config()` →
-`bk_wifi_sta_start()` → 等 `EVENT_WIFI_STA_CONNECTED`。AP 与扫描同理。
+里面，而本树的 `NX_VERSION` 是 6.8.2.0，预处理器根本走不到那两行。`components/bk_wifi/src` 的 **33 个源文件按发布原样全部编过**，一个头都不用要。
 
-**这与 `wireless_ops_s` 的形状几乎是对着设计的**：`essid` / `passwd` / `auth` 存参数，
-`connect()` 调那两个函数，事件回调里调 `netdev_lower_carrier_on()` / `off()`。
+错因值得记下来，因为它在这一轮里以三种形式各犯了一次：
 
-**由此要收回本章前面的一个估计。** 前面说"要实现 204 项 `wifi_os_funcs_t` 适配表"
-——那张表是**替换厂商 OS 抽象层**时才需要填的。若我们把厂商栈整体编进来、自己只做
-上层转接，那 204 项由厂商自带的 `bk_wifi_adapter.c`（1901 行，SDK 里就有）填，我们
-要写的接口面只是十来个公开函数。真实工作量更接近「一层薄转接 + 收发路径」，而不是
-2000–3000 行适配表。
+1. **grep 到文本就下结论，没看它被什么条件守着**——上面这条。
+2. **把 `//` 注释掉的 include 当成有效依赖**统计。
+3. **`2>/dev/null` 把「目录不存在」变成空输出**，空输出又被读成「文件不存在」。
 
-两条路的取舍留给拿到头文件之后再定，但**默认应该是后者**：用厂商自己的 OS 适配层，
-只在最上面接 openvela 的 netdev/wireless，改动面最小、也不用维护分叉。
+代价是：一整章错误的勘察结论、一次 813 MB 的官方 SDK 下载、一次无效的三方对比，以及差点就要向厂商发出的索要请求。把它拦下来的是两次追问——先是「你有好好找了吗 一般这里都有的」（我只改了措辞，没重新验证），然后是「这些项目 bk_idk 里的项目都是可以编译的，那它们缺少头怎么编译的？」——第二问逼出了实际验证。**用户对事实的直觉比我的 grep 可靠。**
 
-### 阻断点没有因此改变
+同一批被推翻的还有「`bk_idk` 是声网定制裁剪版」：`git remote` 显示 `bekencorp/bk_idk`，两份 SDK 都是官方版。
 
-`bk_wifi_init` / `bk_wifi_sta_set_config` / `bk_wifi_sta_start` / `bk_wifi_scan_start`
-**全部实现在 `components/bk_wifi/src/wifi_v2.c`**，而 `wifi_v2.c` 正是使用
-`struct vif_info_tag` 的 8 个文件之一。**门面干净，门后的实现仍然编不出来。**
+### 当前状态
 
-### 拿到头文件后的第一步（照这个顺序）
+`configs/xts` 打开 `CONFIG_BK7258_WIFI` + `CONFIG_BK7258_WIFI_VENDOR` 后，闭源 MAC 会在板上真正执行，控制台打出它自己的：
 
-1. 把 `components/bk_wifi/` + 依赖组件接进本仓构建，目标是**编过、链接过**，不求跑
-2. `bk_netif_init()` / `bk_wifi_init()` 能返回，事件回调能收到 —— 到这里说明厂商栈活了
-3. `wireless_ops_s` 的 `connect()` 接 `bk_wifi_sta_set_config()` + `bk_wifi_sta_start()`；
-   事件回调接 `netdev_lower_carrier_on()`
-4. 收发：`transmit()` 与 `receive()` 对接 `netpkt_t`（本章"三个照文档做会踩的坑"
-   那节的接口以树里驱动为准）
-5. AP 侧同理，走 `bk_wifi_ap_*`
+```
+IP Rev: 802.11ax
+mm_bcn_loss_info: wait 0,wake 0,intv 0,prevent 5,loss_thd 200
+```
 
-ABI 那两三个配置项（`CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 等）在第 1 步就要定对，
-见本章"ABI 风险"一节——**不要照 Kconfig 默认值填**。
+随后在 `mm_init` 内部硬故障。**尚不能收发。**
+
+### 三个「做错也不报错」的接缝
+
+这三个都不是编译错误、不是链接错误，全部表现为几十层之后闭源代码里的取指故障。
+
+**一、`bk_wifi_init()` 带 config 参数。**
+真实签名是 `bk_err_t bk_wifi_init(const wifi_init_config_t *config)`。本仓一度手写 `extern int bk_wifi_init(void)` —— 能编、能链，调用时 r0 是调用方残留的垃圾。厂商第一句就是专防此事的 `if (config->os_funcs == NULL) return BK_FAIL;`，**而垃圾不是 NULL**，检查通过，垃圾指针被存进 `g_wifi_funcs`，`rwnxl_init()` 再从它偏移 0x238 取函数指针跳过去 → `CFSR=0x00000100`（IBUSERR），现场在闭源库里，没有任何未定义符号或链接告警。
+
+纪律：**厂商 API 一律用它自己的头**。`chip/bk7258_wifi_glue.c` 存在的唯一理由就是这个——它用 vendor flags 编译，因此能 include `modules/wifi_types.h` 并使用厂商自己的 `WIFI_DEFAULT_INIT_CONFIG()` 宏。
+
+**二、适配表会被 `--gc-sections` 回收。**
+`g_wifi_os_funcs` 是 211 项函数指针表，但**没有任何代码按名字引用它**——`nm --undefined-only` 扫全部 32 个闭源库，一个引用都没有。于是 `-ffunction-sections -fdata-sections --gc-sections` 把它整个收走，`sta_mgmt_init` 之流从 `.bss` 里的 NULL 指针取表。
+
+`WIFI_DEFAULT_INIT_CONFIG()` 里的 `.os_funcs = &g_wifi_os_funcs` 是它唯一的存活理由。
+
+**表活过来之后，未定义符号从 44 涨到 99。那不是倒退**，是之前被 GC 静默隐藏的真实集成面终于可见。最终收敛到 0。
+
+**三、PHY/RF 适配器必须先注册。**
+`libbk_phy.a` 的 `rf_open_handler`（`rf_cntrl.c:188`）从 `.bss` 的 `g_rf_funcs_t` 取表、按偏移 16 跳转。填表的是 `phy_adapter_init(&g_phy_os_funcs, &g_phy_os_variable)`，厂商在 `bk_init.c` 的 `app_phy_init()` 里调，本仓不走那条路。
+
+**这两张表本仓早就有**——`chip/bk7258_phy_osi.c`，BLE 移植时写的，文件头注释就写着「必须在任何人碰射频之前跑，否则库里每个指针都是 NULL」。但只有 `bk7258_ble.c` 调初始化，而 xts 配置剥掉了 BLE。现已在 `bk7258_wifi_ifup()` 里带幂等保护地调用。
+
+不要改成编译厂商的 `components/bk_phy/src/bk_phy_adapter.c`：那会和 `bk7258_phy_osi.c` 撞 `g_phy_os_funcs` 等四个符号。
+
+### 两个极性陷阱
+
+- **电源岛 `0x44010040`（`cpu_power_sleep_wakeup`）的位是「掉电位」**。`sys_hal_module_power_ctrl()` 开电源是**清位**。写反了就是把正在跑的域关掉。
+- **电源子模块不是域**。`PM_POWER_SUB_MODULE_NAME_PHY_WIFI = 201`，不是一个位；厂商用 `父域 × PM_MODULE_SUB_POWER_DOMAIN_MAX(20) + 序号` 生成，所以 `201 / 20 = 10` 才是 PHY 域号。用除法推导，别列区间表——区间表在厂商插入新子模块时会静默过时。
+
+时钟门控 `0x44010030` 的编号规则可以交叉验证：`PM_CLK_ID_WDG_CPU = 31`，正是 NMI 看门狗那条「先开 `0x44010030` bit31」（十八章）用的同一位。
+
+### 已排除的假设
+
+这一轮推翻的自己的判断，逐条记下来，免得下次重走：
+
+| 假设 | 判据 | 结论 |
+|---|---|---|
+| 栈溢出 | `CFSR=0x01000000` 我按 STKOF 读，实际 bit24 是 **UNALIGNED**（STKOF 是 bit20）；三次启动实测栈只用 **960 字节** | **错**。据此把 `CONFIG_INIT_STACKSIZE` 提到 32768 的改动已回退 |
+| 发生了厂商断言 | 栈上的 `dbg_wifi_assert_handler` 地址是 **Thumb 函数指针值**（某处注册的回调），不是返回地址；且全程无断言输出 | **错**。是裸故障 |
+| 堆未清零导致链表头是垃圾 | `me_strategy_mem_init()` 四次 `malloc` 确实无 memset，厂商堆在 `.bss` 里天然全零——但在 `up_allocate_heap()` 里清零后真机**毫无变化** | **错**，已回退 |
+| 内存不足 | 给 `os_malloc` 加失败日志，一次都没触发；堆约 300 KB | **错** |
+| `sta_info_tab` 是 NULL | 实测 `0x28055628`，8 字节对齐 | **错** |
+| `CONFIG_WIFI_MAC_SUPPORT_STAS_MAX_NUM` 与闭源库不一致（旧章标的 ABI 风险） | 实测 `g_wifi_mac_sta_max_num = 2`，与 `me_strategy_mem_init()` 的 `2*568+1136` 分配式一致；值来自 `sdkconfig.h`，在 `-I` 首条上 | **不成立**，不需要手工对齐 |
+
+**方法论教训**：`R8=0x280444e8`/`R10=0x238` 这类「故障寄存器指向某函数」的推断，在 `arm_hardfault → _assert` 这条路径上不可靠；栈上的地址也可能是函数指针值而非返回地址。**判据必须能独立复现**，否则就是在给自己造证据。
+
+### 当前卡点与下一步
+
+故障被夹在两个确定位置之间：`mm_env_init()`（打印 `mm_bcn_loss_info` 的那个，是 `mm_init` 的第 2 个调用）之后，其余九个调用之一里 —— `vif_mgmt_init` / `sta_mgmt_init` / `td_init` / `ps_init` / `txl_cntrl_init` / `rxl_init` / `mm_timer_init` / `scan_init` / `chan_init`。
+
+拿不到真正的故障 PC 是最大障碍：NuttX 把 BusFault/UsageFault 留在关闭状态，它们升级成 HardFault，`_assert` 打印的是它自己的上下文，而保存的寄存器组落在栈转储范围之外。
+
+**已准备好但尚未跑的办法**：接管异常向量。`irq_attach()` 对系统异常号同样有效（4=MemManage，5=BusFault，6=UsageFault），处理函数的 `context` 参数就是保存的寄存器组，`regs[REG_PC]` 即故障指令地址；配合 `NVIC_SYSHCON`（`0xE000ED24`）的 bit17/bit18 使能，异常就不会升级。实现见 `bk7258_wifi_shim.c` 的 `bk7258_wifi_fault_probe_install()`，已链入镜像，等板子接回来即可烧录取证。
+
+### 规模事实（仍然有效）
+
+- 闭源 `libwifi.a` 外部依赖：本轮实际解决 **99 个符号**，全部在本仓实现或由厂商开源文件补齐，**没有改动任何厂商源码**。
+- `libwifi.a` **一个 `pbuf_*` 都不引用**，所以报文缓冲布局不属于闭源 ABI。但厂商开源侧通过 `-I` 看到的是 **lwIP 2.1.2 的 `struct pbuf`**（`rwnx_rx.c:16` 的 `#include "pbuf.h"` 是无守卫的），所以 `bk7258_wifi_pbuf.c` 必须编在 vendor OBJECT 库里、看同一份头——该结构体在 `PBUF_LIFETIME_DBG` 下会长出尾部字段，布局不一致不会报错，只会静默错位。
+- 厂商自带的 `components/bk_wifi/src/pbuf.c` 用不了：整个文件被 `#if (CONFIG_FULLY_HOSTED || CONFIG_SEMI_HOSTED)` 挡着，而且它写 `p->total_len` 而全树其余代码读 `p->tot_len`，是旧变体的残留。
+- supplicant（`wpa_supplicant-2.10`，150 个 .c / 171.6k 行）尚未移植。scan/monitor 不经过它，所以缺它的代价是**不能关联**，不是没有射频。相关桩全部会在首次被调用时打一行日志。
+
+### 文件分工
+
+| 文件 | 编译方式 | 职责 |
+|---|---|---|
+| `bk7258_wifi.c` | NuttX flags | netdev 下半部，注册 `wlan0`，`ifup()` 里拉起厂商栈 |
+| `bk7258_wifi_shim.c` | NuttX flags | 平台服务，按 **REAL / ADEQUATE / PENDING** 三类分节；PENDING 每个首次调用打一行日志 |
+| `bk7258_wifi_osi.c` | NuttX flags | RTOS 原语（线程/队列/信号量/定时器/字符串/临界区） |
+| `bk7258_wifi_pbuf.c` | **vendor flags** | pbuf 分配器 + `ethernetif_input` 桥接 |
+| `bk7258_wifi_glue.c` | **vendor flags** | 需要厂商头才能取对参数类型的调用 |
+| `bk7258_wifi_vendor.cmake` | — | 33 个厂商源 + `bk_feature.c` + 我们那两个，113 个 `-I`、16 个 `-D` |
+
+PENDING 那一类的一行日志不是装饰。第一次上板时，`wifi: power vote not ported` 正好出现在硬故障的上一行，直接指出电源岛没开——**静默的桩和能工作的实现在出事之前完全无法区分**。
