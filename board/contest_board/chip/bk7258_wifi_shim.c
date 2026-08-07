@@ -978,10 +978,41 @@ int bk_int_isr_register(uint32_t src, void (*isr)(void), void *arg)
  * Public Functions -- REAL: interrupt group masks and modem clock
  ****************************************************************************/
 
-/* sys_drv_int_enable() takes a bit mask, not a line number, and writes the
- * same cpu0_int_*_en pair bk7258_irq.c drives one bit at a time.  Group 2
- * is the 32..63 half.
- */
+/****************************************************************************
+ * Name: sys_drv_int_enable / disable and their group-2 twins
+ *
+ * Description:
+ *   These take a bit mask, not a line number, and write the same
+ *   cpu0_int_*_en pair bk7258_irq.c drives one bit at a time.  Group 2 is
+ *   the 32..63 half.
+ *
+ *   The disable half MUST return what was enabled before, because that
+ *   return value is the only thing the restore has to work from.  From
+ *   rw_task.c, which is the contract:
+ *
+ *     #define WIFI_INT_DISABLE()  int_en_low32  = sys_drv_int_disable(...); \
+ *                                 int_en_high32 = sys_drv_int_group2_disable(...)
+ *     #define WIFI_INT_RESTORE()  sys_drv_int_enable(int_en_low32); \
+ *                                 sys_drv_int_group2_enable(int_en_high32)
+ *
+ *   This port returned 0 from both disablers.  Every critical section the
+ *   MAC took therefore switched its interrupts off and "restored" them to
+ *   an empty mask -- so the first WIFI_INT_DISABLE() in the life of the
+ *   image disabled the MAC's seven lines permanently.
+ *
+ *   Everything that followed is explained by it: the enable bits read back
+ *   clear at scan time although bk_wifi_interrupt_init() had set them, the
+ *   interrupt hit counters stayed at zero on all seven lines, and messages
+ *   to the MAC got no confirmation and asserted five seconds later in
+ *   rw_msg_send().  A zero return is a plausible-looking value for a
+ *   function whose name says nothing about returning anything, which is
+ *   why it survived so long.
+ *
+ *   The masked AND matters: returning the whole register would re-enable
+ *   lines the caller never asked about, including ones another subsystem
+ *   had deliberately masked.
+ *
+ ****************************************************************************/
 
 uint32_t sys_drv_int_enable(uint32_t param)
 {
@@ -991,8 +1022,10 @@ uint32_t sys_drv_int_enable(uint32_t param)
 
 uint32_t sys_drv_int_disable(uint32_t param)
 {
+  uint32_t prev = getreg32(BK7258_SYS_CPU0_INT_EN(0)) & param;
+
   modifyreg32(BK7258_SYS_CPU0_INT_EN(0), param, 0);
-  return 0;
+  return prev;
 }
 
 uint32_t sys_drv_int_group2_enable(uint32_t param)
@@ -1003,8 +1036,10 @@ uint32_t sys_drv_int_group2_enable(uint32_t param)
 
 uint32_t sys_drv_int_group2_disable(uint32_t param)
 {
+  uint32_t prev = getreg32(BK7258_SYS_CPU0_INT_EN(32)) & param;
+
   modifyreg32(BK7258_SYS_CPU0_INT_EN(32), param, 0);
-  return 0;
+  return prev;
 }
 
 /****************************************************************************

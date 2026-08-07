@@ -111,11 +111,11 @@
 
 struct bk_queue_s
 {
-  sem_t        items;      /* Messages available to pop  */
-  sem_t        space;      /* Free slots available to push */
+  sem_t        items;      /* Messages available to pop */
   FAR uint8_t *buf;
   uint32_t     msgsize;
   uint32_t     maxmsg;
+  uint32_t     count;      /* Slots in use */
   uint32_t     head;       /* Next slot to pop  */
   uint32_t     tail;       /* Next slot to push */
 };
@@ -559,15 +559,12 @@ int rtos_init_queue(void **queue, const char *name, uint32_t message_size,
   q->maxmsg  = number_of_messages;
 
   sem_init(&q->items, 0, 0);
-  sem_init(&q->space, 0, number_of_messages);
 
   /* The MAC posts from interrupt handlers, and priority inheritance is not
-   * allowed there.  Both semaphores are pure counters, so there is no
-   * priority to inherit anyway.
+   * allowed there.  This is a pure counter, so there is none to inherit.
    */
 
   sem_setprotocol(&q->items, SEM_PRIO_NONE);
-  sem_setprotocol(&q->space, SEM_PRIO_NONE);
 
   *queue = q;
   return BK_OK;
@@ -589,6 +586,7 @@ static int bk_queue_push(void **queue, void *message, uint32_t timeout_ms,
   FAR struct bk_queue_s *q;
   irqstate_t flags;
   uint32_t slot;
+  uint32_t waited = 0;
 
   if (queue == NULL || *queue == NULL || message == NULL)
     {
@@ -597,28 +595,60 @@ static int bk_queue_push(void **queue, void *message, uint32_t timeout_ms,
 
   q = (FAR struct bk_queue_s *)*queue;
 
-  if (bk_queue_wait(&q->space, timeout_ms) < 0)
-    {
-      return BK_FAIL;
-    }
+  /* Free space is a plain counter guarded by up_irq_save(), not a
+   * semaphore, because the MAC pushes from its own interrupt handlers with
+   * the vendor's BEKEN_NO_WAIT.  NuttX's nxsem_trywait() asserts
+   * !up_interrupt_context(), so a semaphore here brings the board down on
+   * the first MAC interrupt -- which is exactly what happened the moment
+   * the interrupts started arriving.  sem_post() is interrupt-safe and is
+   * all the ISR side needs.
+   *
+   * A blocking push therefore polls rather than sleeping on a counter.
+   * Only task context ever asks to block, the vendor's longest wait is one
+   * second, and a full queue means the MAC is already behind -- so a
+   * millisecond of granularity costs nothing worth having.
+   */
 
-  flags = up_irq_save();
-  if (front)
+  for (; ; )
     {
-      q->head = (q->head + q->maxmsg - 1) % q->maxmsg;
-      slot    = q->head;
-    }
-  else
-    {
-      slot    = q->tail;
-      q->tail = (q->tail + 1) % q->maxmsg;
-    }
+      flags = up_irq_save();
 
-  up_irq_restore(flags);
+      if (q->count < q->maxmsg)
+        {
+          if (front)
+            {
+              q->head = (q->head + q->maxmsg - 1) % q->maxmsg;
+              slot    = q->head;
+            }
+          else
+            {
+              slot    = q->tail;
+              q->tail = (q->tail + 1) % q->maxmsg;
+            }
 
-  memcpy(&q->buf[slot * q->msgsize], message, q->msgsize);
-  sem_post(&q->items);
-  return BK_OK;
+          q->count++;
+          up_irq_restore(flags);
+
+          memcpy(&q->buf[slot * q->msgsize], message, q->msgsize);
+          sem_post(&q->items);
+          return BK_OK;
+        }
+
+      up_irq_restore(flags);
+
+      if (timeout_ms == 0 || up_interrupt_context())
+        {
+          return BK_FAIL;
+        }
+
+      if (timeout_ms != UINT32_MAX && waited >= timeout_ms)
+        {
+          return BK_FAIL;
+        }
+
+      usleep(1000);
+      waited++;
+    }
 }
 
 int rtos_push_to_queue(void **queue, void *message, uint32_t timeout_ms)
@@ -647,10 +677,10 @@ int rtos_pop_from_queue(void **queue, void *message, uint32_t timeout_ms)
   flags   = up_irq_save();
   slot    = q->head;
   q->head = (q->head + 1) % q->maxmsg;
+  q->count--;
   up_irq_restore(flags);
 
   memcpy(message, &q->buf[slot * q->msgsize], q->msgsize);
-  sem_post(&q->space);
   return BK_OK;
 }
 
@@ -669,15 +699,15 @@ bool rtos_is_queue_empty(void **queue)
 
 bool rtos_is_queue_full(void **queue)
 {
-  int count = 0;
+  FAR struct bk_queue_s *q;
 
   if (queue == NULL || *queue == NULL)
     {
       return false;
     }
 
-  sem_getvalue(&((FAR struct bk_queue_s *)*queue)->space, &count);
-  return count <= 0;
+  q = (FAR struct bk_queue_s *)*queue;
+  return q->count >= q->maxmsg;
 }
 
 int rtos_deinit_queue(void **queue)
@@ -693,7 +723,6 @@ int rtos_deinit_queue(void **queue)
   *queue = NULL;
 
   sem_destroy(&q->items);
-  sem_destroy(&q->space);
   kmm_free(q->buf);
   kmm_free(q);
   return BK_OK;
