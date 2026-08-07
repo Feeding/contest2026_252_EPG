@@ -694,6 +694,14 @@ extern void delay_us(uint32_t us);
 
 static void *g_phy_nv_reg_hook;
 
+/* The library's own hook installer and the callback it should carry.  Both
+ * are in archives this image already links -- bk_phy_set_nv_reg_hook in
+ * libwifi.a, nv_phy_reg_set_by_chan_bw in libcom_phy.a.
+ */
+
+extern void bk_phy_set_nv_reg_hook(void *hook);
+extern void nv_phy_reg_set_by_chan_bw(void);
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -926,9 +934,29 @@ static uint8_t phy_osi_wifi_media_mode(void)
  *
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: phy_osi_nv_reg_set_hook
+ *
+ * Description:
+ *   Install the library's per-channel register-set callback.
+ *
+ *   This used to park the pointer in a static nothing reads -- the comment
+ *   above g_phy_nv_reg_hook said so out loud.  That is very likely why the
+ *   receiver hears nothing: phy_init() and mdm_set_channel() both NULL-check
+ *   nv_phy_reg_set_func_ptr and silently skip when it is unset, so the RIU
+ *   CCA and packet-detect thresholds are never programmed on any channel.
+ *   A radio with no detect threshold scans happily and reports
+ *   "recv frame is zero" on every one.
+ *
+ *   The real installer is bk_phy_set_nv_reg_hook() in libwifi.a, already
+ *   linked.
+ *
+ ****************************************************************************/
+
 static void phy_osi_nv_reg_set_hook(void *hook)
 {
   g_phy_nv_reg_hook = hook;
+  bk_phy_set_nv_reg_hook(hook);
 }
 
 /****************************************************************************
@@ -1738,7 +1766,16 @@ static void phy_osi_shell_set_log_level(int level)
 
 static int phy_osi_phy_log_enabled(void)
 {
-  return 0;
+  /* On for bring-up.  This gate is the closed PHY library's own narration --
+   * calibration steps, RF configuration, and every manual_cal_* flash
+   * diagnostic.  With it off those messages are not merely quiet, they are
+   * suppressed at every syslog level, which is why the flash calibration
+   * failures were invisible until they were reasoned out.
+   *
+   * Turn it back off once the receiver works; it is chatty.
+   */
+
+  return 1;
 }
 
 /****************************************************************************
@@ -2397,6 +2434,22 @@ rf_variable_t g_rf_variable =
 int bk7258_phy_adapter_init(void)
 {
   phy_adapter_init(&g_phy_os_funcs, &g_phy_os_variable);
+
+  /* Install the per-channel register-set callback ourselves rather than
+   * waiting for the library to do it.
+   *
+   * In Beken's own build nv_init() calls back through the table's
+   * _nv_phy_reg_set_hook slot.  The nv_init() this image links comes from
+   * libcom_phy.a -- the Wi-Fi-OFF variant -- and its whole body is "bx lr",
+   * so the slot is never invoked no matter how correctly it is filled.
+   * Calling the installer directly is archive-order-neutral and avoids
+   * pulling in libbk_phy.a for one function.
+   */
+
+#ifdef CONFIG_BK7258_WIFI_VENDOR
+  bk_phy_set_nv_reg_hook((void *)nv_phy_reg_set_by_chan_bw);
+#endif
+
   return PHY_OK;
 }
 
