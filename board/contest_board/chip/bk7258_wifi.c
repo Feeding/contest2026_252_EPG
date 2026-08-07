@@ -54,14 +54,17 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <syslog.h>
 
 #include <net/if.h>
+#include <net/if_arp.h>
 #include <nuttx/kmalloc.h>
 #include <nuttx/net/net.h>
 #include <nuttx/net/netdev_lowerhalf.h>
 #include <nuttx/wireless/wireless.h>
 
 #include "bk7258_wifi.h"
+#include "bk7258_wifi_scan.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -513,13 +516,110 @@ static int bk7258_wifi_sensitivity(FAR struct netdev_lowerhalf_s *dev,
   return -ENOSYS;
 }
 
+/****************************************************************************
+ * Name: bk7258_wifi_scan
+ *
+ * Description:
+ *   SIOCSIWSCAN (set == true) starts a scan; SIOCGIWSCAN (set == false)
+ *   returns what the last one found, as the stream of variable-length
+ *   struct iw_event records the wireless extensions define.  One AP is four
+ *   records: BSSID, ESSID, frequency (as a channel), and quality.
+ *
+ *   -EAGAIN is the documented answer to a GET issued before the results are
+ *   in; wapi and iwlist both retry on it.  There is no completion callback
+ *   to hang that on -- the vendor's is a wpa_ctrl_event() this port stubs
+ *   out -- so "in" means the MAC has reported at least one AP, and the
+ *   caller decides how long to keep asking.
+ *
+ ****************************************************************************/
+
 static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
                             FAR struct iwreq *iwr, bool set)
 {
+  FAR struct iw_event *iwe;
+  struct bk7258_scan_ap_s ap;
+  FAR char *buf;
+  size_t used = 0;
+  int count;
+  int i;
+
   UNUSED(dev);
-  UNUSED(iwr);
-  UNUSED(set);
-  return -ENOSYS;
+
+  if (set)
+    {
+      int ret = bk7258_wifi_scan_start();
+
+      syslog(LOG_INFO, "wifi: scan start -> %d\n", ret);
+      return ret == 0 ? OK : -EIO;
+    }
+
+  if (iwr == NULL || iwr->u.data.pointer == NULL)
+    {
+      return -EINVAL;
+    }
+
+  count = bk7258_wifi_scan_count();
+  syslog(LOG_INFO, "wifi: scan results -> %d\n", count);
+  if (count <= 0)
+    {
+      return -EAGAIN;
+    }
+
+  buf = (FAR char *)iwr->u.data.pointer;
+
+  for (i = 0; i < count; i++)
+    {
+      if (bk7258_wifi_scan_get(i, &ap) != 0)
+        {
+          continue;
+        }
+
+      /* Each record is IW_EV_LEN(field) long, and the reader walks the
+       * buffer by those lengths -- so a partial record at the end is worse
+       * than a short list.  Stop cleanly instead.
+       */
+
+      if (used + IW_EV_LEN(ap_addr) + IW_EV_LEN(essid) +
+          IW_EV_LEN(freq) + IW_EV_LEN(qual) > iwr->u.data.length)
+        {
+          break;
+        }
+
+      iwe = (FAR struct iw_event *)&buf[used];
+      iwe->len = IW_EV_LEN(ap_addr);
+      iwe->cmd = SIOCGIWAP;
+      iwe->u.ap_addr.sa_family = ARPHRD_ETHER;
+      memcpy(iwe->u.ap_addr.sa_data, ap.bssid, IFHWADDRLEN);
+      used += iwe->len;
+
+      iwe = (FAR struct iw_event *)&buf[used];
+      iwe->len = IW_EV_LEN(essid);
+      iwe->cmd = SIOCGIWESSID;
+      iwe->u.essid.length  = strnlen(ap.ssid, 32);
+      iwe->u.essid.flags   = 1;
+      iwe->u.essid.pointer = (FAR void *)(uintptr_t)ap.ssid;
+      used += iwe->len;
+
+      iwe = (FAR struct iw_event *)&buf[used];
+      iwe->len = IW_EV_LEN(freq);
+      iwe->cmd = SIOCGIWFREQ;
+      iwe->u.freq.m = ap.channel;
+      iwe->u.freq.e = 0;
+      iwe->u.freq.i = 0;
+      used += iwe->len;
+
+      iwe = (FAR struct iw_event *)&buf[used];
+      iwe->len = IW_EV_LEN(qual);
+      iwe->cmd = IWEVQUAL;
+      iwe->u.qual.qual    = 0;
+      iwe->u.qual.level   = ap.rssi;
+      iwe->u.qual.noise   = 0;
+      iwe->u.qual.updated = IW_QUAL_DBM;
+      used += iwe->len;
+    }
+
+  iwr->u.data.length = used;
+  return OK;
 }
 
 static int bk7258_wifi_range(FAR struct netdev_lowerhalf_s *dev,

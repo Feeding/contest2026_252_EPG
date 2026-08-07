@@ -65,6 +65,12 @@
 
 #include "generated/lmac_wifi_adapter.h"
 
+/* SCAN_PARAM_T, rw_msg_send_add_if, rw_msg_send_scanu_req, sr_get_scan_*. */
+
+#include "bk_private/bk_rw.h"
+
+#include "bk7258_wifi_scan.h"
+
 
 /****************************************************************************
  * Public Functions
@@ -92,4 +98,107 @@ int bk7258_wifi_vendor_init(void)
    */
 
   return bk_wifi_init(&config);
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_scan_start
+ *
+ * Description:
+ *   Start a scan without the supplicant.
+ *
+ *   bk_wifi_scan_start(), the documented entry point, cannot be used here:
+ *   its second act is wifi_supplicant_start() -> wlan_sta_enable() ->
+ *   wpa_ctrl_request(), which this port stubs out.  It logs "wifi enable
+ *   fail" and returns BK_OK without ever asking the MAC to scan, so the
+ *   call looks like it worked.
+ *
+ *   The layer underneath does not need the supplicant at all.  Scan results
+ *   arrive as SCANU_RESULT_IND and are accumulated by rw_msg_rx.c into its
+ *   own scan_rst_set_ptr; the supplicant only gets told afterwards, by a
+ *   wpa_ctrl_event() call that is the last statement in the SCANU_START_CFM
+ *   case and whose failure costs nothing.  So the results are complete and
+ *   sorted whether or not anything is listening.
+ *
+ *   sa_station_init() is what brings the MAC up far enough to scan -- reset,
+ *   me_config, chan_config, start -- and it guards itself on whether a VIF
+ *   already exists, so calling it again is harmless.
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_scan_start(void)
+{
+  static uint8_t vif_idx = 0xff;
+  SCAN_PARAM_T param;
+  int ret;
+
+  sa_station_init();
+
+  if (vif_idx == 0xff)
+    {
+      struct mm_add_if_cfm cfm;
+      uint8_t mac[6];
+
+      bk_wifi_sta_get_mac(mac);
+
+      ret = rw_msg_send_add_if(mac, NL80211_IFTYPE_STATION, 0, &cfm);
+      if (ret != 0 || cfm.status != 0)
+        {
+          return -1;
+        }
+
+      vif_idx = cfm.inst_nbr;
+    }
+
+  /* All-zero means: every supported channel, any BSSID, no SSID filter,
+   * no extra IEs.  rw_msg_send_scanu_req() reads freqs[0] == 0 as "use
+   * rw_ieee80211_init_scan_chan()", which is the full channel list.
+   */
+
+  os_memset(&param, 0, sizeof(param));
+  param.vif_idx = vif_idx;
+
+  return rw_msg_send_scanu_req(&param) == 0 ? 0 : -1;
+}
+
+int bk7258_wifi_scan_count(void)
+{
+  return (int)sr_get_scan_number();
+}
+
+int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap)
+{
+  SCAN_RST_UPLOAD_T *set;
+  SCAN_RST_ITEM_T *item;
+  int ret = -1;
+
+  if (ap == NULL || index < 0)
+    {
+      return -1;
+    }
+
+  /* sr_get_scan_results() takes a reference; it has to be released or the
+   * next scan cannot free the set.
+   */
+
+  set = (SCAN_RST_UPLOAD_T *)sr_get_scan_results();
+  if (set == NULL)
+    {
+      return -1;
+    }
+
+  if (index < set->scanu_num && set->res[index] != NULL)
+    {
+      item = set->res[index];
+
+      os_memcpy(ap->bssid, item->bssid, sizeof(ap->bssid));
+      os_memcpy(ap->ssid, item->ssid, sizeof(item->ssid));
+      ap->ssid[sizeof(item->ssid)] = '\0';
+      ap->channel = item->channel;
+      ap->rssi    = item->level;
+      ap->caps    = item->caps;
+      ret = 0;
+    }
+
+  sr_release_scan_results(set);
+  return ret;
 }
