@@ -814,10 +814,71 @@ static uint32_t phy_modem_bus_clk_ctrl(bool clk_en)
  *
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: phy_osi_null_reg_api and the four register-API accessors
+ *
+ * Description:
+ *   phy_adapter_init() does not just take this table -- it calls four of
+ *   its entries and stores what they return into g_mpb_funcs_t,
+ *   g_crm_funcs_t, g_riu_funcs_t and g_phy_funcs_t.  Those are the PHY's
+ *   own register APIs, and the closed calibration code reaches through
+ *   them by offset: rwnx_tpc_get_pwridx_by_rate() loads g_phy_funcs_t,
+ *   takes the function pointer at +260 and branches to it.
+ *
+ *   Returning NULL here is correct for a BLE-only image -- BLE never
+ *   touches those APIs, and Beken's own wrapper returns NULL too when
+ *   CONFIG_WIFI_ENABLE is off.  With WiFi in the image it is not: the
+ *   stored NULL turns into a branch through [NULL + 260], which arrives as
+ *   an instruction access violation inside closed code with nothing naming
+ *   the table.
+ *
+ *   The four real accessors live in libwifi.a.  Nothing else references
+ *   them, so naming them here is also what keeps --gc-sections from
+ *   collecting them.
+ *
+ ****************************************************************************/
+
 static void *phy_osi_null_reg_api(void)
 {
   return NULL;
 }
+
+#ifdef CONFIG_BK7258_WIFI_VENDOR
+extern void *mpb_reg_api(void);
+extern void *crm_reg_api(void);
+extern void *riu_reg_api(void);
+extern void *mix_funcs(void);
+
+static void *phy_osi_mpb_reg_api(void)
+{
+  return mpb_reg_api();
+}
+
+static void *phy_osi_crm_reg_api(void)
+{
+  return crm_reg_api();
+}
+
+static void *phy_osi_riu_reg_api(void)
+{
+  return riu_reg_api();
+}
+
+static void *phy_osi_mix_funcs(void)
+{
+  return mix_funcs();
+}
+
+#  define PHY_OSI_MPB_REG_API  phy_osi_mpb_reg_api
+#  define PHY_OSI_CRM_REG_API  phy_osi_crm_reg_api
+#  define PHY_OSI_RIU_REG_API  phy_osi_riu_reg_api
+#  define PHY_OSI_MIX_FUNCS    phy_osi_mix_funcs
+#else
+#  define PHY_OSI_MPB_REG_API  phy_osi_null_reg_api
+#  define PHY_OSI_CRM_REG_API  phy_osi_null_reg_api
+#  define PHY_OSI_RIU_REG_API  phy_osi_null_reg_api
+#  define PHY_OSI_MIX_FUNCS    phy_osi_null_reg_api
+#endif
 
 static uint8_t phy_osi_wifi_media_mode(void)
 {
@@ -2024,10 +2085,10 @@ phy_os_funcs_t g_phy_os_funcs =
 {
   ._version                          = PHY_OSI_VERSION,
 
-  ._mpb_reg_api                      = phy_osi_null_reg_api,
-  ._crm_reg_api                      = phy_osi_null_reg_api,
-  ._riu_reg_api                      = phy_osi_null_reg_api,
-  ._mix_funcs                        = phy_osi_null_reg_api,
+  ._mpb_reg_api                      = PHY_OSI_MPB_REG_API,
+  ._crm_reg_api                      = PHY_OSI_CRM_REG_API,
+  ._riu_reg_api                      = PHY_OSI_RIU_REG_API,
+  ._mix_funcs                        = PHY_OSI_MIX_FUNCS,
   ._bk_misc_get_reset_reason         = phy_osi_get_reset_reason,
 
   /* Wi-Fi rate-sensitivity and EVM test entries: absent, as the vendor

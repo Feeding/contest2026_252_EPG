@@ -195,6 +195,8 @@ static int bk7258_fault_probe(int irq, FAR void *context, FAR void *arg)
   syslog(LOG_ERR, "FAULT irq=%d PC=%08" PRIx32 " LR=%08" PRIx32
                   " CFSR=%08" PRIx32 "\n",
          irq, regs[REG_PC], regs[REG_LR], getreg32(0xe000ed28));
+  syslog(LOG_ERR, "  MMFAR=%08" PRIx32 " BFAR=%08" PRIx32 "\n",
+         getreg32(0xe000ed34), getreg32(0xe000ed38));
   syslog(LOG_ERR, "  R0=%08" PRIx32 " R1=%08" PRIx32 " R2=%08" PRIx32
                   " R3=%08" PRIx32 "\n",
          regs[REG_R0], regs[REG_R1], regs[REG_R2], regs[REG_R3]);
@@ -208,10 +210,11 @@ static int bk7258_fault_probe(int irq, FAR void *context, FAR void *arg)
 
 void bk7258_wifi_fault_probe_install(void)
 {
+  int r4 = irq_attach(4, bk7258_fault_probe, NULL);   /* MemManage  */
   int r5 = irq_attach(5, bk7258_fault_probe, NULL);   /* BusFault   */
   int r6 = irq_attach(6, bk7258_fault_probe, NULL);   /* UsageFault */
 
-  modifyreg32(0xe000ed24, 0, (1u << 17) | (1u << 18));
+  modifyreg32(0xe000ed24, 0, (1u << 16) | (1u << 17) | (1u << 18));
 
   /* SHPR1: MemManage, BusFault and UsageFault priorities, one byte each.
    * They have to outrank whatever BASEPRI the faulting code is running
@@ -223,8 +226,9 @@ void bk7258_wifi_fault_probe_install(void)
 
   putreg32(0, 0xe000ed18);
 
-  syslog(LOG_INFO, "probe: attach %d/%d SHCSR=%08" PRIx32 " SHPR1=%08"
-         PRIx32 "\n", r5, r6, getreg32(0xe000ed24), getreg32(0xe000ed18));
+  syslog(LOG_INFO, "probe: attach %d/%d/%d SHCSR=%08" PRIx32 " SHPR1=%08"
+         PRIx32 "\n", r4, r5, r6,
+         getreg32(0xe000ed24), getreg32(0xe000ed18));
 }
 
 /****************************************************************************
