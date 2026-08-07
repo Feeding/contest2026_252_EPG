@@ -208,6 +208,7 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
       extern int bk7258_phy_adapter_init(void);
       extern int bk7258_rf_adapter_init(void);
       extern int bk7258_wifi_vendor_init(void);
+      extern void bk7258_wifi_zeroing(bool on);
       static bool phy_ready = false;
       int ret;
 
@@ -236,6 +237,16 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
           phy_ready = true;
         }
 
+      /* Left on for the life of the stack, not just across init.  The
+       * first attempt scoped it to bk7258_wifi_vendor_init() and the board
+       * got all the way through RF calibration before faulting on a
+       * semaphore handle that was garbage rather than NULL -- the same
+       * assumption, in an allocation made from the work queue after the
+       * window had closed.  The assumption belongs to the vendor stack as
+       * a whole.
+       */
+
+      bk7258_wifi_zeroing(true);
       ret = bk7258_wifi_vendor_init();
 
       if (ret != 0)

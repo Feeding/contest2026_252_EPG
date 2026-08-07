@@ -47,6 +47,7 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -58,6 +59,7 @@
 #include <nuttx/arch.h>
 #include <nuttx/clock.h>
 #include <nuttx/irq.h>
+#include <nuttx/mm/mm.h>
 
 #include <arch/board/board.h>
 
@@ -166,7 +168,7 @@ static uint32_t g_bk7258_wifi_rx_frames;
 static uint32_t g_bk7258_wifi_rx_bytes;
 
 /****************************************************************************
- * Temporary: fault probe
+ * Fault probe
  *
  * NuttX leaves BusFault and UsageFault disabled, so they escalate to Hard
  * Fault and the interrupted context is lost by the time _assert() prints --
@@ -174,6 +176,14 @@ static uint32_t g_bk7258_wifi_rx_bytes;
  * attaching here keeps the exception unescalated, and the handler's
  * "context" argument IS the saved register frame, so REG_PC is the
  * instruction that actually faulted.
+ *
+ * Two details cost a flash cycle each and are worth keeping.  The enables
+ * in SHCSR are not enough on their own: the exception also has to outrank
+ * the BASEPRI the faulting code runs under, or it is masked and escalates
+ * anyway -- the first attempt had both handlers attached and still printed
+ * "Hard Fault escalation" with BASEPRI 0x80.  Hence SHPR1 = 0.  And the
+ * probe is installed from WiFi bring-up only because that is where it was
+ * needed; nothing about it is WiFi-specific.
  ****************************************************************************/
 
 static int bk7258_fault_probe(int irq, FAR void *context, FAR void *arg)
@@ -183,9 +193,14 @@ static int bk7258_fault_probe(int irq, FAR void *context, FAR void *arg)
   UNUSED(arg);
 
   syslog(LOG_ERR, "FAULT irq=%d PC=%08" PRIx32 " LR=%08" PRIx32
-                  " CFSR=%08" PRIx32 " BFAR=%08" PRIx32 "\n",
-         irq, regs[REG_PC], regs[REG_LR],
-         getreg32(0xe000ed28), getreg32(0xe000ed38));
+                  " CFSR=%08" PRIx32 "\n",
+         irq, regs[REG_PC], regs[REG_LR], getreg32(0xe000ed28));
+  syslog(LOG_ERR, "  R0=%08" PRIx32 " R1=%08" PRIx32 " R2=%08" PRIx32
+                  " R3=%08" PRIx32 "\n",
+         regs[REG_R0], regs[REG_R1], regs[REG_R2], regs[REG_R3]);
+  syslog(LOG_ERR, "  R4=%08" PRIx32 " R5=%08" PRIx32 " R6=%08" PRIx32
+                  " R7=%08" PRIx32 "\n",
+         regs[REG_R4], regs[REG_R5], regs[REG_R6], regs[REG_R7]);
 
   PANIC();
   return OK;
@@ -193,9 +208,82 @@ static int bk7258_fault_probe(int irq, FAR void *context, FAR void *arg)
 
 void bk7258_wifi_fault_probe_install(void)
 {
-  irq_attach(5, bk7258_fault_probe, NULL);   /* BusFault   */
-  irq_attach(6, bk7258_fault_probe, NULL);   /* UsageFault */
+  int r5 = irq_attach(5, bk7258_fault_probe, NULL);   /* BusFault   */
+  int r6 = irq_attach(6, bk7258_fault_probe, NULL);   /* UsageFault */
+
   modifyreg32(0xe000ed24, 0, (1u << 17) | (1u << 18));
+
+  /* SHPR1: MemManage, BusFault and UsageFault priorities, one byte each.
+   * They have to outrank whatever BASEPRI the faulting code is running
+   * under or the exception is masked and escalates to Hard Fault anyway --
+   * which is exactly what happened on the first attempt: the enables were
+   * set, both handlers were attached, and the dump still said "Hard Fault
+   * escalation" with BASEPRI 0x80.  Priority 0 cannot be masked by BASEPRI.
+   */
+
+  putreg32(0, 0xe000ed18);
+
+  syslog(LOG_INFO, "probe: attach %d/%d SHCSR=%08" PRIx32 " SHPR1=%08"
+         PRIx32 "\n", r5, r6, getreg32(0xe000ed24), getreg32(0xe000ed18));
+}
+
+/****************************************************************************
+ * Zero-filled allocation for the vendor MAC
+ *
+ * me_strategy_mem_init() allocates the station table with plain malloc()
+ * and never clears it.  sta_mgmt_init() then hands each entry to
+ * sta_mgmt_entry_init(), which drains the entry's TX list *before* the
+ * memset that would have initialised it -- correct when re-initialising a
+ * live station, fatal on a fresh allocation, because the list head is
+ * whatever was in that memory before.
+ *
+ * Beken get away with it because their heap is a static array in .bss and
+ * their WiFi init runs early in boot, so malloc() there returns memory the
+ * C startup already zeroed.  Here the stack comes up from ifup(), long
+ * after tasks have been created and destroyed, and the block handed back
+ * had been a task stack: NuttX colours those with 0xdeadbeef, so the list
+ * head read 0xdeadbeef, and the load faulted -- an unaligned access to
+ * 0xC0000000-0xDFFFFFFF, which is Device memory and faults regardless of
+ * CCR.UNALIGN_TRP.  That is why the fault was UNALIGNED rather than a
+ * plain bad-pointer BusFault, and why zeroing the heap once at
+ * up_allocate_heap() did nothing: by then the memory had been recycled.
+ *
+ * So malloc() is interposed here.  Two things keep that honest:
+ *
+ *   - It only exists when this file does, which is CONFIG_BK7258_WIFI.
+ *     An image without the WiFi driver links libc's malloc as usual.
+ *   - It only zeroes once the vendor stack has been brought up, so an
+ *     image that never runs ifup on wlan0 gets the ordinary allocator and
+ *     pays nothing.
+ *
+ * The window was originally just the init call.  That was too narrow: the
+ * board reached RF calibration and then faulted on a semaphore handle
+ * holding garbage instead of NULL, from an allocation made on the work
+ * queue after the window closed.  The assumption belongs to the vendor
+ * stack as a whole, so the flag stays set once it is up.
+ ****************************************************************************/
+
+static bool g_bk7258_wifi_zeroing;
+
+void bk7258_wifi_zeroing(bool on)
+{
+  g_bk7258_wifi_zeroing = on;
+}
+
+FAR void *malloc(size_t size)
+{
+  FAR void *ret = mm_malloc(USR_HEAP, size);
+
+  if (ret == NULL)
+    {
+      set_errno(ENOMEM);
+    }
+  else if (g_bk7258_wifi_zeroing)
+    {
+      memset(ret, 0, size);
+    }
+
+  return ret;
 }
 
 /****************************************************************************

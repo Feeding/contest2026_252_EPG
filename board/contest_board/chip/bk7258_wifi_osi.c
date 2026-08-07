@@ -246,18 +246,80 @@ int32_t os_memcmp(const void *s1, const void *s2, uint32_t n)
  * Public Functions -- threads
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: bk_thread_trampoline
+ *
+ * Description:
+ *   NuttX task entry points are int(int argc, char *argv[]); the vendor's
+ *   are void(void *).  Casting one to the other compiles, links, and starts
+ *   a thread that reads argc as its argument -- which is how this port
+ *   spent an afternoon: the WiFi work queue's worker got a bogus "queue"
+ *   pointer, read a semaphore handle out of it, and faulted several frames
+ *   inside nxsem_wait() with nothing naming the caller.
+ *
+ *   The pair is passed through argv as a hex string because that is the
+ *   only channel kthread_create() offers, and NuttX copies argv's strings
+ *   into the new task, so a caller stack buffer is safe.  argv[0] is the
+ *   task name; the first real argument is argv[1].
+ *
+ ****************************************************************************/
+
+struct bk_thread_arg_s
+{
+  void (*function)(void *arg);
+  void *arg;
+};
+
+static int bk_thread_trampoline(int argc, FAR char *argv[])
+{
+  FAR struct bk_thread_arg_s *a;
+  void (*function)(void *arg);
+  void *arg;
+
+  if (argc < 2 || argv[1] == NULL)
+    {
+      nerr("ERROR: thread trampoline lost its argument\n");
+      return EXIT_FAILURE;
+    }
+
+  a        = (FAR struct bk_thread_arg_s *)strtoul(argv[1], NULL, 16);
+  function = a->function;
+  arg      = a->arg;
+  kmm_free(a);
+
+  function(arg);
+  return EXIT_SUCCESS;
+}
+
 int rtos_create_thread(void **thread, uint8_t priority, const char *name,
                        void (*function)(void *), uint32_t stack_size,
                        void *arg)
 {
+  FAR struct bk_thread_arg_s *a;
+  FAR char *argv[2];
+  char buf[2 + 2 * sizeof(uintptr_t) + 1];
   int pid;
 
   UNUSED(priority);
 
+  a = kmm_malloc(sizeof(struct bk_thread_arg_s));
+  if (a == NULL)
+    {
+      return BK_FAIL;
+    }
+
+  a->function = function;
+  a->arg      = arg;
+
+  snprintf(buf, sizeof(buf), "%p", a);
+  argv[0] = buf;
+  argv[1] = NULL;
+
   pid = kthread_create(name, BK_WIFI_THREAD_PRIO, (int)stack_size,
-                       (main_t)function, (FAR char * const *)arg);
+                       bk_thread_trampoline, argv);
   if (pid < 0)
     {
+      kmm_free(a);
       nerr("ERROR: kthread_create(%s): %d\n", name, pid);
       return BK_FAIL;
     }
@@ -323,12 +385,48 @@ int rtos_init_semaphore(void **semaphore, int max_count)
   return BK_OK;
 }
 
+/****************************************************************************
+ * Name: bk_handle_ok
+ *
+ * Description:
+ *   Sanity-check a handle the vendor stack hands back to us.  Every one of
+ *   these is a void* we allocated and stored in the vendor's own struct, so
+ *   a value that is not a 4-aligned pointer into RAM means the vendor is
+ *   passing something it never got from us -- typically an uninitialised
+ *   field it tested against NULL and found "set".
+ *
+ *   Worth checking rather than trusting: the alternative is nxsem_wait()
+ *   dereferencing it, which faults several frames away with nothing naming
+ *   the caller.  The return address goes in the message for exactly that
+ *   reason.
+ *
+ ****************************************************************************/
+
+static bool bk_handle_ok(FAR void *h, FAR const char *what, FAR void *ra)
+{
+  uintptr_t p = (uintptr_t)h;
+
+  if (p >= CONFIG_RAM_START && p < CONFIG_RAM_START + CONFIG_RAM_SIZE &&
+      (p & 3) == 0)
+    {
+      return true;
+    }
+
+  syslog(LOG_ERR, "wifi: bogus %s handle %p from %p\n", what, h, ra);
+  return false;
+}
+
 int rtos_get_semaphore(void **semaphore, uint32_t timeout_ms)
 {
   FAR sem_t *s;
   struct timespec ts;
 
   if (semaphore == NULL || *semaphore == NULL)
+    {
+      return BK_FAIL;
+    }
+
+  if (!bk_handle_ok(*semaphore, "semaphore", __builtin_return_address(0)))
     {
       return BK_FAIL;
     }
