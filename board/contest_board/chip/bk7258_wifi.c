@@ -547,7 +547,11 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
 
   if (set)
     {
-      int ret = bk7258_wifi_scan_start();
+      extern void bk7258_wifi_irq_report(void);
+      int ret;
+
+      bk7258_wifi_irq_report();
+      ret = bk7258_wifi_scan_start();
 
       syslog(LOG_INFO, "wifi: scan start -> %d\n", ret);
       return ret == 0 ? OK : -EIO;

@@ -46,6 +46,7 @@
 #include <debug.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <malloc.h>
 #include <mqueue.h>
 #include <semaphore.h>
@@ -92,16 +93,31 @@
  * Private Types
  ****************************************************************************/
 
-/* A queue is a NuttX message queue plus the element size it was created
- * with -- mq_send() needs the length on every call and the vendor API does
- * not pass one.
+/* A ring buffer plus two counting semaphores, not a POSIX message queue.
+ *
+ * mqd_t is a file descriptor, and NuttX file descriptor tables are per task
+ * group.  The vendor's beken_queue_t is a plain void* they pass freely
+ * between tasks: rw_msg_send() pushes from whichever task called it, and
+ * core_thread -- a separate kthread_create() task -- pops.  With mq_open()
+ * behind it, the descriptor was valid only in the task that created the
+ * queue, so every mq_receive() in the consumer returned EBADF at once and
+ * the thread span at "Ready" forever while messages piled up unread.  The
+ * symptom was rw_msg_send() timing out five seconds later and asserting,
+ * two layers away.
+ *
+ * Nothing here is task-scoped: the handle is memory, which is what the
+ * vendor's API promises.
  */
 
 struct bk_queue_s
 {
-  mqd_t    mq;
-  uint32_t msgsize;
-  char     name[32];
+  sem_t        items;      /* Messages available to pop  */
+  sem_t        space;      /* Free slots available to push */
+  FAR uint8_t *buf;
+  uint32_t     msgsize;
+  uint32_t     maxmsg;
+  uint32_t     head;       /* Next slot to pop  */
+  uint32_t     tail;       /* Next slot to push */
 };
 
 /* A one-shot timer is a watchdog plus the two arguments the vendor's
@@ -478,11 +494,53 @@ int rtos_deinit_semaphore(void **semaphore)
  * Public Functions -- queues
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: bk_queue_wait
+ *
+ * Description:
+ *   Take one count from a semaphore, honouring the vendor's timeout
+ *   convention: 0 means do not block, 0xffffffff means block forever, and
+ *   anything else is milliseconds.
+ *
+ ****************************************************************************/
+
+static int bk_queue_wait(FAR sem_t *sem, uint32_t timeout_ms)
+{
+  struct timespec ts;
+
+  if (timeout_ms == 0)
+    {
+      return sem_trywait(sem);
+    }
+
+  if (timeout_ms == UINT32_MAX)
+    {
+      return sem_wait(sem);
+    }
+
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec  += timeout_ms / 1000;
+  ts.tv_nsec += (timeout_ms % 1000) * 1000000;
+  if (ts.tv_nsec >= NSEC_PER_SEC)
+    {
+      ts.tv_sec++;
+      ts.tv_nsec -= NSEC_PER_SEC;
+    }
+
+  return sem_timedwait(sem, &ts);
+}
+
 int rtos_init_queue(void **queue, const char *name, uint32_t message_size,
                     uint32_t number_of_messages)
 {
   FAR struct bk_queue_s *q;
-  struct mq_attr attr;
+
+  UNUSED(name);
+
+  if (queue == NULL || message_size == 0 || number_of_messages == 0)
+    {
+      return BK_FAIL;
+    }
 
   q = kmm_zalloc(sizeof(struct bk_queue_s));
   if (q == NULL)
@@ -490,122 +548,154 @@ int rtos_init_queue(void **queue, const char *name, uint32_t message_size,
       return BK_FAIL;
     }
 
-  /* Message queues are named objects in NuttX, and two WiFi queues created
-   * with the same vendor name would otherwise collide.  The address makes
-   * it unique without needing a counter.
-   */
-
-  snprintf(q->name, sizeof(q->name), "/bkw%s%p", name ? name : "q", q);
-
-  attr.mq_maxmsg  = number_of_messages;
-  attr.mq_msgsize = message_size;
-  attr.mq_flags   = 0;
-  attr.mq_curmsgs = 0;
-
-  q->mq = mq_open(q->name, O_RDWR | O_CREAT, 0666, &attr);
-  if (q->mq == (mqd_t)-1)
+  q->buf = kmm_malloc(message_size * number_of_messages);
+  if (q->buf == NULL)
     {
-      nerr("ERROR: mq_open(%s): %d\n", q->name, errno);
       kmm_free(q);
       return BK_FAIL;
     }
 
   q->msgsize = message_size;
+  q->maxmsg  = number_of_messages;
+
+  sem_init(&q->items, 0, 0);
+  sem_init(&q->space, 0, number_of_messages);
+
+  /* The MAC posts from interrupt handlers, and priority inheritance is not
+   * allowed there.  Both semaphores are pure counters, so there is no
+   * priority to inherit anyway.
+   */
+
+  sem_setprotocol(&q->items, SEM_PRIO_NONE);
+  sem_setprotocol(&q->space, SEM_PRIO_NONE);
+
   *queue = q;
+  return BK_OK;
+}
+
+/****************************************************************************
+ * Name: rtos_push_to_queue / rtos_push_to_queue_front
+ *
+ * Description:
+ *   Copy one message in.  The index update runs with interrupts masked
+ *   because the MAC pushes from its own ISRs; the copy itself does not, so
+ *   the critical section stays as short as the shared state requires.
+ *
+ ****************************************************************************/
+
+static int bk_queue_push(void **queue, void *message, uint32_t timeout_ms,
+                         bool front)
+{
+  FAR struct bk_queue_s *q;
+  irqstate_t flags;
+  uint32_t slot;
+
+  if (queue == NULL || *queue == NULL || message == NULL)
+    {
+      return BK_FAIL;
+    }
+
+  q = (FAR struct bk_queue_s *)*queue;
+
+  if (bk_queue_wait(&q->space, timeout_ms) < 0)
+    {
+      return BK_FAIL;
+    }
+
+  flags = up_irq_save();
+  if (front)
+    {
+      q->head = (q->head + q->maxmsg - 1) % q->maxmsg;
+      slot    = q->head;
+    }
+  else
+    {
+      slot    = q->tail;
+      q->tail = (q->tail + 1) % q->maxmsg;
+    }
+
+  up_irq_restore(flags);
+
+  memcpy(&q->buf[slot * q->msgsize], message, q->msgsize);
+  sem_post(&q->items);
   return BK_OK;
 }
 
 int rtos_push_to_queue(void **queue, void *message, uint32_t timeout_ms)
 {
-  FAR struct bk_queue_s *q;
-
-  if (queue == NULL || *queue == NULL)
-    {
-      return BK_FAIL;
-    }
-
-  q = (FAR struct bk_queue_s *)*queue;
-
-  /* Zero timeout means "do not block", which the MAC uses from interrupt
-   * context; anything else is treated as a wait, because the vendor's
-   * blocking calls all pass 0xffffffff.
-   */
-
-  if (timeout_ms == 0)
-    {
-      return mq_send(q->mq, message, q->msgsize, 0) == 0 ? BK_OK : BK_FAIL;
-    }
-
-  return mq_send(q->mq, message, q->msgsize, 0) == 0 ? BK_OK : BK_FAIL;
+  return bk_queue_push(queue, message, timeout_ms, false);
 }
 
 int rtos_pop_from_queue(void **queue, void *message, uint32_t timeout_ms)
 {
   FAR struct bk_queue_s *q;
-  struct timespec ts;
-  ssize_t ret;
+  irqstate_t flags;
+  uint32_t slot;
 
-  if (queue == NULL || *queue == NULL)
+  if (queue == NULL || *queue == NULL || message == NULL)
     {
       return BK_FAIL;
     }
 
   q = (FAR struct bk_queue_s *)*queue;
 
-  if (timeout_ms == UINT32_MAX)
+  if (bk_queue_wait(&q->items, timeout_ms) < 0)
     {
-      ret = mq_receive(q->mq, message, q->msgsize, NULL);
-    }
-  else
-    {
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_sec  += timeout_ms / 1000;
-      ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-      if (ts.tv_nsec >= NSEC_PER_SEC)
-        {
-          ts.tv_sec++;
-          ts.tv_nsec -= NSEC_PER_SEC;
-        }
-
-      ret = mq_timedreceive(q->mq, message, q->msgsize, NULL, &ts);
+      return BK_FAIL;
     }
 
-  return ret >= 0 ? BK_OK : BK_FAIL;
+  flags   = up_irq_save();
+  slot    = q->head;
+  q->head = (q->head + 1) % q->maxmsg;
+  up_irq_restore(flags);
+
+  memcpy(message, &q->buf[slot * q->msgsize], q->msgsize);
+  sem_post(&q->space);
+  return BK_OK;
 }
 
 bool rtos_is_queue_empty(void **queue)
 {
-  FAR struct bk_queue_s *q;
-  struct mq_attr attr;
+  int count = 0;
 
   if (queue == NULL || *queue == NULL)
     {
       return true;
     }
 
-  q = (FAR struct bk_queue_s *)*queue;
+  sem_getvalue(&((FAR struct bk_queue_s *)*queue)->items, &count);
+  return count <= 0;
+}
 
-  if (mq_getattr(q->mq, &attr) < 0)
+bool rtos_is_queue_full(void **queue)
+{
+  int count = 0;
+
+  if (queue == NULL || *queue == NULL)
     {
-      return true;
+      return false;
     }
 
-  return attr.mq_curmsgs == 0;
+  sem_getvalue(&((FAR struct bk_queue_s *)*queue)->space, &count);
+  return count <= 0;
 }
 
 int rtos_deinit_queue(void **queue)
 {
   FAR struct bk_queue_s *q;
 
-  if (queue != NULL && *queue != NULL)
+  if (queue == NULL || *queue == NULL)
     {
-      q = (FAR struct bk_queue_s *)*queue;
-      mq_close(q->mq);
-      mq_unlink(q->name);
-      kmm_free(q);
-      *queue = NULL;
+      return BK_FAIL;
     }
 
+  q = (FAR struct bk_queue_s *)*queue;
+  *queue = NULL;
+
+  sem_destroy(&q->items);
+  sem_destroy(&q->space);
+  kmm_free(q->buf);
+  kmm_free(q);
   return BK_OK;
 }
 
@@ -819,56 +909,17 @@ bool rtos_is_current_thread(void **thread)
   return (pid_t)(intptr_t)*thread == getpid();
 }
 
-/****************************************************************************
- * Public Functions -- queue and timer additions
- ****************************************************************************/
 
-bool rtos_is_queue_full(void **queue)
-{
-  FAR struct bk_queue_s *q;
-  struct mq_attr attr;
-
-  if (queue == NULL || *queue == NULL)
-    {
-      return false;
-    }
-
-  q = (FAR struct bk_queue_s *)*queue;
-
-  if (mq_getattr(q->mq, &attr) < 0)
-    {
-      return false;
-    }
-
-  return attr.mq_curmsgs >= attr.mq_maxmsg;
-}
-
-/****************************************************************************
- * Name: rtos_push_to_queue_front
- *
- * Description:
- *   POSIX message queues order by priority, not by insertion, and there is
- *   no head insert.  Sending at a higher priority than rtos_push_to_queue()
- *   uses is the closest true equivalent: the message overtakes everything
- *   already queued, which is what "front" is for.
- *
- ****************************************************************************/
+/* Genuine head insertion now that the queue is our own ring buffer.  The
+ * old implementation faked it with a higher POSIX message priority, which
+ * is not the same thing: priority reorders against other priorities, not
+ * against insertion order within one.
+ */
 
 int rtos_push_to_queue_front(void **queue, void *message,
                              uint32_t timeout_ms)
 {
-  FAR struct bk_queue_s *q;
-
-  if (queue == NULL || *queue == NULL || message == NULL)
-    {
-      return BK_FAIL;
-    }
-
-  q = (FAR struct bk_queue_s *)*queue;
-
-  UNUSED(timeout_ms);
-
-  return mq_send(q->mq, message, q->msgsize, 1) == 0 ? BK_OK : BK_FAIL;
+  return bk_queue_push(queue, message, timeout_ms, true);
 }
 
 /****************************************************************************

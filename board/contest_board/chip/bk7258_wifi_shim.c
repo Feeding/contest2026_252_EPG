@@ -878,6 +878,7 @@ void net_begin_send_arp_reply(bool is_send_arp, bool is_allow_send_req)
 #define BK7258_WIFI_ISR_MAX  64
 
 static void (*g_bk7258_wifi_isr[BK7258_WIFI_ISR_MAX])(void);
+static uint32_t g_bk7258_wifi_isr_hits[BK7258_WIFI_ISR_MAX];
 
 static int bk7258_wifi_isr_trampoline(int irq, FAR void *context,
                                       FAR void *arg)
@@ -889,6 +890,7 @@ static int bk7258_wifi_isr_trampoline(int irq, FAR void *context,
 
   if (line < BK7258_WIFI_ISR_MAX && g_bk7258_wifi_isr[line] != NULL)
     {
+      g_bk7258_wifi_isr_hits[line]++;
       g_bk7258_wifi_isr[line]();
     }
 
@@ -914,6 +916,35 @@ static int bk7258_wifi_isr_trampoline(int irq, FAR void *context,
  *   on, and nothing else in this port attaches a handler to them.
  *
  ****************************************************************************/
+
+/* Diagnostic: has any of the MAC's interrupts ever actually been taken?
+ * The registrations and the enables are both visible in the log, but
+ * neither says a line has fired -- and a MAC that never interrupts looks
+ * exactly like a MAC that never answers, which is where scan is stuck.
+ */
+
+void bk7258_wifi_irq_report(void)
+{
+  int i;
+
+  syslog(LOG_INFO, "wifi: irq en 0-31 %08" PRIx32 " 32-63 %08" PRIx32 "\n",
+         getreg32(BK7258_SYS_CPU0_INT_EN(0)),
+         getreg32(BK7258_SYS_CPU0_INT_EN(32)));
+
+  for (i = 0; i < BK7258_WIFI_ISR_MAX; i++)
+    {
+      if (g_bk7258_wifi_isr[i] != NULL)
+        {
+          syslog(LOG_INFO, "wifi: irq src %d hits %" PRIu32 "\n",
+                 i, g_bk7258_wifi_isr_hits[i]);
+          up_enable_irq(NVIC_IRQ_FIRST + i);
+        }
+    }
+
+  syslog(LOG_INFO, "wifi: irq re-en 0-31 %08" PRIx32 " 32-63 %08" PRIx32 "\n",
+         getreg32(BK7258_SYS_CPU0_INT_EN(0)),
+         getreg32(BK7258_SYS_CPU0_INT_EN(32)));
+}
 
 int bk_int_isr_register(uint32_t src, void (*isr)(void), void *arg)
 {
