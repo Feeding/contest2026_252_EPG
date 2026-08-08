@@ -547,11 +547,7 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
 
   if (set)
     {
-      extern void bk7258_wifi_irq_report(void);
-      int ret;
-
-      bk7258_wifi_irq_report();
-      ret = bk7258_wifi_scan_start();
+      int ret = bk7258_wifi_scan_start();
 
       syslog(LOG_INFO, "wifi: scan start -> %d\n", ret);
       return ret == 0 ? OK : -EIO;
@@ -563,6 +559,23 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
     }
 
   count = bk7258_wifi_scan_count();
+
+  /* Report the interrupt counters here, not at scan start.  At start they
+   * are trivially zero; what matters is whether the MAC took a single
+   * RX-trigger interrupt while the radio was walking the channels.  wapi
+   * polls this path, so once is enough -- rate-limit it.
+   */
+
+    {
+      extern void bk7258_wifi_irq_report(void);
+      static int reported = 0;
+
+      if (reported++ == 0)
+        {
+          bk7258_wifi_irq_report();
+        }
+    }
+
   syslog(LOG_INFO, "wifi: scan results -> %d\n", count);
   if (count <= 0)
     {

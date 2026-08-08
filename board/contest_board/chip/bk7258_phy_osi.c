@@ -2118,6 +2118,64 @@ static void phy_osi_dsss_only_stub(void)
  * probes whose honest answer is "absent", not "present and does nothing".
  */
 
+/****************************************************************************
+ * Rate-sensitivity and EVM entries
+ *
+ * These were NULL, justified by "absent, as the vendor leaves them with
+ * CONFIG_WIFI_ENABLE off".  That premise is false for this build:
+ * sdkconfig.h on the vendor include path has CONFIG_WIFI_ENABLE 1, and
+ * Beken's own g_phy_os_funcs assigns all eight unconditionally, with no
+ * wrapper and no guard.
+ *
+ * Leaving them NULL is not merely incomplete, it is eight armed traps: the
+ * consumers do "ldr r3,[rX,#off]; blx r3" with no NULL test, and rxsens
+ * (do_rx_sensitivity) and txevm (do_evm) are live registered console
+ * commands in this image.
+ *
+ * They are wired now for a second reason.  The receiver currently reports
+ * zero frames on all thirteen channels and takes no RX-trigger interrupt at
+ * all; rxsens is the vendor's own receiver test, and it is a far more
+ * direct instrument than reading more disassembly.
+ *
+ * Note _evm_init takes evm_phy_init -- the field name and the symbol name
+ * do not match, and there is no symbol called evm_init.  Note also that
+ * _evm_set_ke_evt_mac_bit and _evm_clear_ke_evt_mac_bit must be wired
+ * together; one without the other arms half of the KE_EVT_MAC path.
+ *
+ * All eight live in libwifi.a, already linked.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_BK7258_WIFI_VENDOR
+extern void rs_init(uint32_t channel, int32_t band, uint32_t mode);
+extern void rs_bypass_mac_init(uint32_t channel, int32_t band,
+                               uint32_t mode);
+extern void rs_deinit(void);
+extern void evm_phy_init(uint32_t channel, int32_t band, uint32_t bw);
+extern void evm_bypass_mac_init(uint32_t freq, int32_t band, uint32_t bw);
+extern void evm_clear_ke_evt_mac_bit(void);
+extern void evm_set_ke_evt_mac_bit(void);
+extern void tx_evm_set_chan_ctxt_pop(void *chan_info);
+
+#  define PHY_OSI_RS_INIT            rs_init
+#  define PHY_OSI_RS_BYPASS_MAC_INIT rs_bypass_mac_init
+#  define PHY_OSI_RS_DEINIT          rs_deinit
+#  define PHY_OSI_EVM_INIT           evm_phy_init
+#  define PHY_OSI_EVM_BYPASS_MAC     evm_bypass_mac_init
+#  define PHY_OSI_EVM_CLR_KE_EVT     evm_clear_ke_evt_mac_bit
+#  define PHY_OSI_EVM_SET_KE_EVT     evm_set_ke_evt_mac_bit
+#  define PHY_OSI_TX_EVM_CHAN_POP    tx_evm_set_chan_ctxt_pop
+#else
+#  define PHY_OSI_RS_INIT            NULL
+#  define PHY_OSI_RS_BYPASS_MAC_INIT NULL
+#  define PHY_OSI_RS_DEINIT          NULL
+#  define PHY_OSI_EVM_INIT           NULL
+#  define PHY_OSI_EVM_BYPASS_MAC     NULL
+#  define PHY_OSI_EVM_CLR_KE_EVT     NULL
+#  define PHY_OSI_EVM_SET_KE_EVT     NULL
+#  define PHY_OSI_TX_EVM_CHAN_POP    NULL
+#endif
+
 phy_os_funcs_t g_phy_os_funcs =
 {
   ._version                          = PHY_OSI_VERSION,
@@ -2136,15 +2194,15 @@ phy_os_funcs_t g_phy_os_funcs =
    * filled in.
    */
 
-  ._rs_init                          = NULL,
-  ._rs_bypass_mac_init               = NULL,
-  ._rs_deinit                        = NULL,
-  ._evm_init                         = NULL,
-  ._evm_bypass_mac_init              = NULL,
+  ._rs_init                          = PHY_OSI_RS_INIT,
+  ._rs_bypass_mac_init               = PHY_OSI_RS_BYPASS_MAC_INIT,
+  ._rs_deinit                        = PHY_OSI_RS_DEINIT,
+  ._evm_init                         = PHY_OSI_EVM_INIT,
+  ._evm_bypass_mac_init              = PHY_OSI_EVM_BYPASS_MAC,
   ._nv_phy_reg_set_hook              = phy_osi_nv_reg_set_hook,
-  ._evm_clear_ke_evt_mac_bit         = NULL,
-  ._evm_set_ke_evt_mac_bit           = NULL,
-  ._tx_evm_set_chan_ctxt_pop         = NULL,
+  ._evm_clear_ke_evt_mac_bit         = PHY_OSI_EVM_CLR_KE_EVT,
+  ._evm_set_ke_evt_mac_bit           = PHY_OSI_EVM_SET_KE_EVT,
+  ._tx_evm_set_chan_ctxt_pop         = PHY_OSI_TX_EVM_CHAN_POP,
   ._save_info_item                   = NULL,
   ._get_info_item                    = NULL,
 

@@ -120,6 +120,20 @@ if(CONFIG_BK7258_TIMER)
     timertest.c)
 endif()
 
+if(CONFIG_BK7258_WIFI_VENDOR)
+  # Beken's own receiver-sensitivity test.  The vendor reaches it through
+  # bk_cli, which this port does not build (see src/rxsens.c).
+  nuttx_add_application(
+    NAME
+    rxsens
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    rxsens.c)
+endif()
+
 if(CONFIG_TESTING_NIST_STS)
   # Instrument for the "MAX # OF OPENED FILES" wall the NIST suite hits.
   nuttx_add_application(
