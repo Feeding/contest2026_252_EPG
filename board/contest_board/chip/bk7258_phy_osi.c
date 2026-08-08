@@ -2137,9 +2137,26 @@ static bk_err_t phy_osi_rf_pm_vote_power(unsigned int module,
  *
  * Description:
  *   Stub pair.  Both switch the Wi-Fi modem between DSSS-only and full
- *   OFDM reception while bluetooth holds the radio; with no Wi-Fi modem in
- *   this image there is nothing to narrow.  The vendor compiles its bodies
- *   out under the same condition.
+ *   OFDM reception while bluetooth holds the radio.
+ *
+ *   The original reason given here -- "no Wi-Fi modem in this image, and the
+ *   vendor compiles its bodies out under the same condition" -- is wrong for
+ *   configs/xts.  bk_rf_adapter.c:27-46 guards them on CONFIG_WIFI_ENABLE,
+ *   which is on, so the vendor calls the real phy_exit_dsss_only() /
+ *   phy_enter_dsss_only() from libwifi.a (phy_karst_bk7236.c.obj).
+ *
+ *   Stubbing them is nevertheless harmless, for a different reason, and this
+ *   one is checked rather than assumed -- disassembled out of the archive:
+ *   both bodies are gated on dsss_only_flag, which lives in .bss and is set
+ *   only by phy_enter_dsss_only itself.  At boot the flag is 0, so the real
+ *   phy_exit_dsss_only returns without touching the modem, and the only
+ *   thing our stub skips on the enter side is setting RIU 0x4980b390 bit 9.
+ *   Net effect: this port never narrows the receiver to DSSS, where the
+ *   vendor would while BLE holds the radio.  That is more receive capability,
+ *   not less, so it is not a candidate for "recv frame is zero".
+ *
+ *   Wire them for real before shipping Wi-Fi/BLE coexistence, where the
+ *   narrowing is the point.
  *
  ****************************************************************************/
 
