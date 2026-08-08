@@ -23,6 +23,19 @@
  * netinit do it.  Its output comes from the closed PHY library and is
  * gated by _bk_feature_phy_log_enable in bk7258_phy_osi.c.
  *
+ * RUN IT IN THE BACKGROUND:  rxsens -c 6 -d 2000 &
+ *
+ * It does not return.  Run in the foreground it occupies NSH, and since it
+ * prints nothing after "[RS]reset_mm" the console looks dead -- which is
+ * how this was first, wrongly, written up as "hangs the board".  It does
+ * not: with "&" the shell stays responsive and ps shows the task alive.
+ *
+ * What ps actually shows is the useful part.  The task sits in state Ready,
+ * not Waiting, with its stack usage identical across samples minutes apart:
+ * a tight spin at a fixed call depth, not a blocked wait.  Interrupts are
+ * never masked either -- a traced run recorded zero rtos_disable_int calls.
+ * So the test is polling for something that never arrives.
+ *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.  The
@@ -46,6 +59,7 @@
 
 #include <nuttx/config.h>
 
+#include <stdbool.h>
 #include <stdio.h>
 
 /****************************************************************************
@@ -58,6 +72,12 @@
  */
 
 extern void rx_sens_cmd_test(char *buf, int len, int argc, char **argv);
+
+/* Temporary: arms the critical-section trace in bk7258_ble_shim.c while the
+ * rxsens hang is being located.
+ */
+
+extern void bk7258_int_trace(bool on);
 
 /****************************************************************************
  * Public Functions
@@ -79,6 +99,8 @@ int main(int argc, FAR char *argv[])
    * the command name -- which is exactly what NSH hands us.
    */
 
+  bk7258_int_trace(true);
   rx_sens_cmd_test(NULL, 0, argc, argv);
+  bk7258_int_trace(false);
   return 0;
 }
