@@ -52,6 +52,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <syslog.h>
 #include <time.h>
@@ -450,13 +451,51 @@ void shell_log_flush(void)
 {
 }
 
+/****************************************************************************
+ * Name: shell_assert_out
+ *
+ * Description:
+ *   Where the vendor stack reports a failed BK_ASSERT.
+ *
+ *   This must not go through syslog, and the reason is the whole point of
+ *   the function.  Beken's assert macro masks interrupts before it prints:
+ *   rtos_disable_int, shell_log_flush, rtos_get_time, shell_assert_out,
+ *   bk_system_dump, then "while (1);".  syslog needs the character driver
+ *   and therefore interrupts, so an assert printed that way is silent --
+ *   the board looks like it merely stopped.
+ *
+ *   That is exactly what happened with rxsens: it hit an assert, printed
+ *   nothing, and sat in the vendor's infinite loop looking like a task that
+ *   was simply busy.  up_putc() is the OS's polled low-level path and works
+ *   inside the masked window.
+ *
+ *   The trailing "while (1)" belongs to the vendor and runs whatever this
+ *   returns, so PANIC() only changes who reports it.  It is kept for
+ *   bcontinue == false because a NuttX assert dump carries the task and
+ *   stack state, which the vendor's spin does not.
+ *
+ ****************************************************************************/
+
+static void bk_putstr(FAR const char *s)
+{
+  while (*s != '\0')
+    {
+      up_putc(*s++);
+    }
+}
+
 int shell_assert_out(bool bcontinue, char *format, ...)
 {
+  char buf[192];
   va_list ap;
 
   va_start(ap, format);
-  vsyslog(LOG_ERR, format, ap);
+  vsnprintf(buf, sizeof(buf), format, ap);
   va_end(ap);
+
+  bk_putstr("wifi: ASSERT ");
+  bk_putstr(buf);
+  bk_putstr("\r\n");
 
   if (!bcontinue)
     {
