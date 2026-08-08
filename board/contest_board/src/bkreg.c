@@ -11,6 +11,7 @@
  * Usage:
  *
  *   bkreg                    the WiFi preset, decoded (see below)
+ *   bkreg rf [ms]            watch the radio controller while it is open
  *   bkreg <addr>             one 32-bit word
  *   bkreg <addr> <count>     count consecutive words
  *
@@ -79,6 +80,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include <inttypes.h>
 
 /****************************************************************************
@@ -89,6 +93,7 @@
 #define SYS_POWER_SLEEP     0x44010040ul
 #define MAC_CORE_CLK        0x49000004ul
 #define MAC_SOFT_RESET      0x49108050ul
+#define RC_REG0             0x4980c000ul   /* SOC_RC_REG_BASE word 0 */
 
 #define CLK_MAC_BIT         26
 #define CLK_PHY_BIT         27
@@ -152,6 +157,102 @@ static void wifi_preset(void)
 }
 
 /****************************************************************************
+ * Name: rf_watch
+ *
+ * Description:
+ *   Sample the radio controller's word 0 for as long as the radio is open.
+ *
+ *   Reading 0x4980c000 is only safe while the Wi-Fi PHY domain is powered
+ *   and clocked, and that window is about 1.7 s wide -- it opens when
+ *   rwnxl_wakeup re-votes the radio and closes again after scanu_confirm.
+ *   Racing it from the console does not work and gets the bus hang wrong
+ *   half the time, so this polls the gate instead and only touches the
+ *   block on the samples where it is genuinely up.  Start it first, then
+ *   run the scan.
+ *
+ *   What matters is bit 0 (rf_en, the only bit rc_drv_set_rf_en writes) and
+ *   bits 24..27, which nothing in the image writes and which
+ *   rwnx_cal_set_rfconfig reports as "rf on"/"rf off".  Distinct values are
+ *   accumulated rather than streamed: the interesting question is whether
+ *   that nibble is ever anything but zero.
+ *
+ ****************************************************************************/
+
+#define RF_MAX_SEEN 8
+
+static void rf_watch(unsigned long ms)
+{
+  struct timespec start;
+  struct timespec now;
+  uint32_t seen[RF_MAX_SEEN];
+  unsigned long count[RF_MAX_SEEN];
+  int nseen = 0;
+  unsigned long samples = 0;
+  unsigned long up = 0;
+  int i;
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
+  for (; ; )
+    {
+      uint32_t clk;
+      uint32_t pwr;
+
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      if ((now.tv_sec - start.tv_sec) * 1000 +
+          (now.tv_nsec - start.tv_nsec) / 1000000 >= (long)ms)
+        {
+          break;
+        }
+
+      samples++;
+
+      clk = peek(SYS_DEV_CLK_EN);
+      pwr = peek(SYS_POWER_SLEEP);
+
+      if (((clk >> CLK_PHY_BIT) & 1) != 0 &&
+          ((pwr >> PWD_WIFP_PHY_BIT) & 1) == 0)
+        {
+          uint32_t v = peek(RC_REG0);
+
+          up++;
+
+          for (i = 0; i < nseen; i++)
+            {
+              if (seen[i] == v)
+                {
+                  count[i]++;
+                  break;
+                }
+            }
+
+          if (i == nseen && nseen < RF_MAX_SEEN)
+            {
+              seen[nseen] = v;
+              count[nseen] = 1;
+              nseen++;
+            }
+        }
+
+      usleep(1000);
+    }
+
+  printf("samples=%lu  phy-up=%lu  distinct=%d\n", samples, up, nseen);
+
+  for (i = 0; i < nseen; i++)
+    {
+      printf("  rc0=0x%08" PRIx32 "  rf_en=%" PRIu32 "  nibble[27:24]=0x%" PRIx32
+             "  (%lu samples)\n",
+             seen[i], seen[i] & 1, (seen[i] >> 24) & 0xf, count[i]);
+    }
+
+  if (up == 0)
+    {
+      printf("  radio never opened during the window -- run the scan\n");
+    }
+}
+
+/****************************************************************************
  * Public Functions
  ****************************************************************************/
 
@@ -164,6 +265,12 @@ int main(int argc, FAR char *argv[])
   if (argc < 2)
     {
       wifi_preset();
+      return 0;
+    }
+
+  if (strcmp(argv[1], "rf") == 0)
+    {
+      rf_watch(argc > 2 ? strtoul(argv[2], NULL, 0) : 5000);
       return 0;
     }
 
