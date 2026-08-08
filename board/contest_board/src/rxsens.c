@@ -73,10 +73,7 @@
 
 extern void rx_sens_cmd_test(char *buf, int len, int argc, char **argv);
 
-/* libwifi.a.  Clears bit 13 of 0x49000004, the MAC core clock gate.
- *
- * Necessary but NOT sufficient -- read the second half of this note before
- * concluding anything from it.
+/* libwifi.a.  Bring the MAC out of doze before touching it.
  *
  * The command reaches the MAC outside the core thread:
  *
@@ -85,33 +82,57 @@ extern void rx_sens_cmd_test(char *buf, int len, int argc, char **argv);
  *
  * and hal_machw_stop sets the MAC soft-reset bit and polls it until the
  * hardware clears it.  rwnx_intf_init() calls rwnxl_sleep() at the tail of
- * wifi_init(), which gates that clock off; core_thread_main re-opens it for
- * every message it pops, but the NSH task never goes through core_thread_main,
- * so on this path the clock stayed gated.  Measured with bkreg while the task
- * spun: core_clk=GATED and soft_reset=1 at the same moment.
+ * wifi_init(), and core_thread_main undoes that for every message it pops --
+ * but the NSH task never goes through core_thread_main, so the MAC is still
+ * asleep when this command reaches it.
  *
- * Calling this first is the vendor's own idiom rather than an invention --
- * dbg_assert_err and dbg_wifi_assert_handler are its only other callers, for
- * exactly this reason: they need the MAC reachable from whatever context the
- * assert fired in.
+ * Two narrower attempts came first and are recorded because each was wrong in
+ * an instructive way.  hal_machw_enable_maccore_clk() alone opens the clock
+ * gate -- bkreg confirmed core_clk=running -- and the soft-reset poll still
+ * never terminated.  Adding rf_module_vote_ctrl(RF_OPEN, RF_BY_WIFI_BIT) then
+ * powered and clocked the modem too (phytrace showed rf_vote(202,0) and
+ * modem_clk(27,1)), and instead of hanging the board reset -- with the
+ * vendor's own assert finally saying what was actually wrong:
  *
- * What it does NOT do is fix the hang, and the earlier claim in this tree
- * that the gated clock was the root cause is withdrawn.  With this call in
- * place bkreg now reports core_clk=running -- and soft_reset is still 1, with
- * the task still spinning in the same poll.  So the gate was genuinely shut
- * and is now genuinely open, and the reset still does not complete.
+ *     wifi: ASSERT MAC is in doze, open maccore and phy clock
+ *     !!!ASSERT at nxmac_current_state_getf:2001.
  *
- * The standing suspicion is the modem: at the moment of the measurement
- * phy_cken was 0 and wifp_phy was OFF, and the MAC's reset may need the
- * MAC-PHY interface clock to retire.  Do not test that by racing a scan
- * against rxsens from the console -- that was tried and it reset the board.
- * Note also that the vendor's own rxsens is an ATE-mode tool: rwnx_intf_init
- * only calls rwnxl_sleep() on the !ate_is_enabled() branch, and this port's
- * ate_is_enabled() returns false, so the stack puts itself to sleep in a way
- * the vendor's test build never does.
+ * That is the guard at the top of every nxmac accessor: it reads the doze
+ * byte at 0x2803d94c+1 and asserts if it is set.  The MAC was never merely
+ * clock-gated -- it is logically in doze, rwnxl_sleep set that flag, and no
+ * amount of poking clocks clears it.  A dozing MAC does not run its soft
+ * reset, which is why the poll never finished.
+ *
+ * So wake it properly.  rwnxl_wakeup() clears the doze flag, clears the core
+ * clock gate (the same bic that hal_machw_enable_maccore_clk does), and takes
+ * the Wi-Fi RF vote itself -- which is why neither of the two calls above is
+ * needed any more.
+ *
+ * That gets the test through its whole init sequence for the first time --
+ * [RS]reset_mm, config_me, config_me_channel, start_mm, and seven ISRs
+ * registered -- so the soft-reset poll really was blocked on doze.
+ *
+ * It is still not enough to run the test, and the way it now fails is the
+ * next thing to fix rather than a mystery.  About four seconds in, the NMI
+ * watchdog bites with core_thread as the current task, and its stack is
+ *
+ *     core_thread_main+0x102 -> mac_sleep_check+0x110 -> rwnxl_sleep+0x104
+ *
+ * i.e. the core thread was putting the MAC back to sleep while this task had
+ * just woken it.  The wake/sleep pair belongs to the core thread and is not
+ * safe to drive from here; core_thread_main runs mac_sleep_check after every
+ * message it pops, so any wake done from the console is undone underneath it.
+ *
+ * The real fix is to stop the stack parking the MAC at all for the duration
+ * of a radio test, which is exactly what the vendor's build does: rxsens is
+ * an ATE-mode tool, rwnx_intf_init only calls rwnxl_sleep() on the
+ * !ate_is_enabled() branch, and this port's ate_is_enabled() returns false.
+ * Making that answer true (or runtime-switchable) is the next step, and it is
+ * worth trying against the zero-receive problem generally, not just here --
+ * ps_env_set_ps_on(true) is set on the same branch.
  */
 
-extern void hal_machw_enable_maccore_clk(void);
+extern void rwnxl_wakeup(void);
 
 /* Temporary: arms the critical-section trace in bk7258_ble_shim.c while the
  * rxsens hang is being located.
@@ -139,7 +160,7 @@ int main(int argc, FAR char *argv[])
    * the command name -- which is exactly what NSH hands us.
    */
 
-  hal_machw_enable_maccore_clk();
+  rwnxl_wakeup();
 
   bk7258_int_trace(true);
   rx_sens_cmd_test(NULL, 0, argc, argv);
