@@ -69,6 +69,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -759,6 +760,21 @@ static uint32_t phy_ana_get_field(int n, uint32_t pos, uint32_t mask)
  *
  ****************************************************************************/
 
+/* Temporary, for the "PHY is off during a scan" measurement.  bkreg shows
+ * pwd_wifp_phy set and phy_cken clear at idle, during a scan, and while
+ * rxsens spins -- so something switches the radio off and nothing switches
+ * it back.  This names the caller instead of inferring it.  The return
+ * address is the closed library's call site; resolve it against
+ * cmake_out/contest2026_252_board_xts/nuttx.
+ */
+
+static void phy_pwr_trace(const char *what, unsigned int module,
+                          uint32_t state, void *ra)
+{
+  syslog(LOG_INFO, "phytrace: %s(%u,%" PRIu32 ") ra=%p\n",
+         what, module, state, ra);
+}
+
 static int phy_power_domain_ctrl(unsigned int module, uint32_t power_state)
 {
   uint32_t bit;
@@ -798,6 +814,8 @@ static int phy_power_domain_ctrl(unsigned int module, uint32_t power_state)
 
 static uint32_t phy_modem_clk_ctrl(bool clk_en)
 {
+  phy_pwr_trace("modem_clk", 27, clk_en, __builtin_return_address(0));
+
   modifyreg32(PHY_SYS_CLK_EN,
               clk_en ? 0 : PHY_CKEN_PHY,
               clk_en ? PHY_CKEN_PHY : 0);
@@ -814,11 +832,17 @@ static uint32_t phy_modem_bus_clk_ctrl(bool clk_en)
  * Name: phy_osi_wifi_* / phy_osi_no_wifi_*
  *
  * Description:
- *   Wi-Fi is not built into this image.  The four register-window getters
- *   return NULL, which is what the vendor returns with CONFIG_WIFI_ENABLE
- *   off, and the media-mode probe reports "off".  The point of answering
- *   rather than leaving them NULL is that the honest answer to "is Wi-Fi
+ *   Written when Wi-Fi was not in the image: the four register-window getters
+ *   returned NULL, which is what the vendor returns with CONFIG_WIFI_ENABLE
+ *   off, and the media-mode probe reported "off".  The point of answering
+ *   rather than leaving them NULL was that the honest answer to "is Wi-Fi
  *   holding the radio" must be no, never an unmapped call.
+ *
+ *   In configs/xts Wi-Fi *is* in the image, and the four getters now forward
+ *   to the real windows (see the CONFIG_BK7258_WIFI_VENDOR branch below).
+ *   phy_osi_wifi_media_mode() still returns 0 -- the vendor's own default
+ *   when no media mode has been configured -- which is correct here but is
+ *   no longer "Wi-Fi is absent", so do not reason from that premise.
  *
  ****************************************************************************/
 
@@ -1262,8 +1286,16 @@ static float phy_osi_saradc_calculate(UINT16 adc_val)
  *
  *   The PHY clock and power entries are real: they are on the radio path,
  *   not the sleep path.  The vendor reference-counts these votes in its
- *   power manager; with BLE as the only radio user in this image there is
- *   exactly one voter, so writing the gate directly is equivalent.
+ *   power manager.
+ *
+ *   This used to say "with BLE as the only radio user in this image there is
+ *   exactly one voter, so writing the gate directly is equivalent".  That was
+ *   true when the file was written and is not true in configs/xts, where Wi-Fi
+ *   is a second voter.  It turns out not to matter, but by luck rather than by
+ *   design: rf_module_vote_ctrl does its own reference counting one level up,
+ *   on a holder bitmask, and only reaches these entries when the mask empties.
+ *   Measured on the board -- rwnxl_sleep closes the vote and rwnxl_wakeup
+ *   reopens it, and the PHY is powered and clocked for the whole of a scan.
  *
  ****************************************************************************/
 
@@ -1280,6 +1312,9 @@ static int phy_osi_pm_phy_pwrup(void)
 
 static int phy_osi_pm_vote_power_phy(int32_t value)
 {
+  phy_pwr_trace("vote_phy", PHY_PWR_MODULE_WIFI_PHY, (uint32_t)value,
+                __builtin_return_address(0));
+
   return phy_power_domain_ctrl(PHY_PWR_MODULE_WIFI_PHY, (uint32_t)value);
 }
 
@@ -2082,12 +2117,18 @@ static void phy_osi_ble_tx_testmode_retrig(void)
 static void phy_osi_rf_module_power_ctrl(unsigned int module,
                                          uint32_t power_state)
 {
+  phy_pwr_trace("rf_module", module, power_state,
+                __builtin_return_address(0));
+
   phy_power_domain_ctrl(module, power_state);
 }
 
 static bk_err_t phy_osi_rf_pm_vote_power(unsigned int module,
                                          uint32_t power_state)
 {
+  phy_pwr_trace("rf_vote", module, power_state,
+                __builtin_return_address(0));
+
   return phy_power_domain_ctrl(module, power_state);
 }
 

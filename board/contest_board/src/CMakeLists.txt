@@ -132,6 +132,18 @@ if(CONFIG_BK7258_WIFI_VENDOR)
     100
     SRCS
     rxsens.c)
+
+  # Register peek, so "is that bit set on the board" stops being answered by
+  # reading vendor source (see src/bkreg.c).
+  nuttx_add_application(
+    NAME
+    bkreg
+    STACKSIZE
+    2048
+    PRIORITY
+    100
+    SRCS
+    bkreg.c)
 endif()
 
 if(CONFIG_TESTING_NIST_STS)
