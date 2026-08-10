@@ -104,6 +104,37 @@ config BK7258_WIFI_VENDOR
 
 		Requires the Beken SDK checked out; BK_IDK_ROOT points at it.
 
+config BK7258_WIFI_ATE
+	bool "Answer yes to Beken's ATE (factory test) probe"
+	default n
+	depends on BK7258_WIFI_VENDOR
+	---help---
+		Make ate_is_enabled() report that the chip is in Beken's factory
+		test mode.  It is not -- that mode is entered by a strapping pin
+		their boot loader samples -- so this is a lie told deliberately,
+		and the product configuration should leave it off.
+
+		It exists because of one of the four places the stack asks.  With
+		the honest answer, rwnx_intf_init() ends wifi_init() by calling
+		rwnxl_sleep() and ps_env_set_ps_on(true): the MAC is parked in
+		doze with power save on, and this port has no wake machinery
+		outside the WiFi core thread.  Anything that reaches the MAC from
+		another context then finds it asleep, which is what the vendor's
+		own assert says -- "MAC is in doze, open maccore and phy clock",
+		at nxmac_current_state_getf:2001.  Beken's radio tools never meet
+		this because they run with ATE on.
+
+		The other three sites are harmless and, if anything, helpful:
+		rw_ieee80211_init sets a per-channel regulatory byte,
+		rwnx_handle_dynparams (rwnx_params.c:775) enables VHT/HE MCS 0-9,
+		and the fourth is the adapter slot itself.  None of them expects
+		test equipment on the other end of the radio, contrary to what the
+		comment in bk7258_wifi_shim.c used to claim.
+
+		bk7258_wifi_ate_enable() overrides this at run time; it has to be
+		called before bk7258_wifi_ifup(), which is where bk_wifi_init()
+		runs.
+
 config BK7258_FLASH
 	bool "On-chip flash MTD"
 	default n

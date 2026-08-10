@@ -592,19 +592,54 @@ int dma_memcpy(void *out, const void *in, uint32_t len)
 }
 
 /****************************************************************************
- * Name: ate_is_enabled
+ * Name: ate_is_enabled / bk7258_wifi_ate_enable
  *
  * Description:
  *   ATE is Beken's factory test mode, entered by a strapping pin their
- *   bootloader samples.  This port never enters it, and answering "yes"
- *   would divert the stack into calibration paths that expect test
- *   equipment on the other end of the radio.
+ *   bootloader samples.  This port never enters it.
+ *
+ *   The original note here said answering "yes" would divert the stack into
+ *   calibration paths that expect test equipment on the other end of the
+ *   radio.  That was a guess, and having now read all four call sites in the
+ *   linked image it is wrong -- every one of them makes the stack *more*
+ *   permissive, and none of them reaches for an instrument:
+ *
+ *     rw_ieee80211_init+0x8a   sets one byte per channel (regulatory flag)
+ *     rwnx_handle_dynparams    rwnx_params.c:775, enables VHT/HE MCS 0-9
+ *     rwnx_intf_init+0x54      skips rwnxl_sleep() and ps_env_set_ps_on(true)
+ *     wifi_ate_is_enabled_wrapper   the adapter slot itself
+ *
+ *   The third one is why this is now switchable.  On the "no" answer the
+ *   stack parks the MAC in doze and turns power save on at the tail of
+ *   wifi_init(), and this port has no wake machinery outside the core
+ *   thread, so anything reaching the MAC from another context finds it
+ *   asleep -- which is exactly what the vendor's own assert reported:
+ *   "MAC is in doze, open maccore and phy clock" at
+ *   nxmac_current_state_getf:2001.  The vendor's radio tools never meet this
+ *   because they run with ATE on.
+ *
+ *   Kept as a Kconfig with a runtime override rather than a hard-coded
+ *   answer: this is a test mode, the product path should keep saying no, and
+ *   the switch has to be settable before bk_wifi_init() runs, which is
+ *   inside bk7258_wifi_ifup().
  *
  ****************************************************************************/
 
+static bool g_bk7258_ate_enabled =
+#ifdef CONFIG_BK7258_WIFI_ATE
+  true;
+#else
+  false;
+#endif
+
 bool ate_is_enabled(void)
 {
-  return false;
+  return g_bk7258_ate_enabled;
+}
+
+void bk7258_wifi_ate_enable(bool enable)
+{
+  g_bk7258_ate_enabled = enable;
 }
 
 /****************************************************************************
