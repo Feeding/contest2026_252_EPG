@@ -34,7 +34,8 @@ struct bk7258_scan_ap_s
   char    ssid[33];      /* NUL-terminated; the vendor's is 32 unterminated */
   uint8_t channel;
   int32_t rssi;
-  uint16_t caps;         /* 802.11 capability field; bit 4 is Privacy */
+  uint16_t caps;                    /* 802.11 capability field; bit 4 Privacy */
+  int      security;                /* enum bk_wlan_sec_type_e */
 };
 
 /* Kick off a scan.  Returns 0 once the request has been accepted by the

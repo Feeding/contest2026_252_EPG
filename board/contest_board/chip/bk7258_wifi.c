@@ -613,6 +613,7 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
         }
 
       len += IW_EV_LEN(ap_addr) + IW_EV_LEN(freq) + IW_EV_LEN(qual) +
+             IW_EV_LEN(data) +
              IW_EV_LEN(essid) + ((strnlen(ap.ssid, 32) + 3) & ~3);
     }
 
@@ -674,6 +675,21 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
       iwe->u.qual.level   = ap.rssi;
       iwe->u.qual.noise   = 0;
       iwe->u.qual.updated = IW_QUAL_DBM;
+      used += iwe->len;
+
+      /* Encryption.  wapi only reads u.data.flags here (wireless.c:470), and
+       * prints it as the "encode" column -- 0xffff until this event existed,
+       * because that is what it initialises the field to.  There is no key
+       * to report, so length is zero and the payload offset is unused.
+       */
+
+      iwe = (FAR struct iw_event *)&buf[used];
+      iwe->len = IW_EV_LEN(data);
+      iwe->cmd = SIOCGIWENCODE;
+      iwe->u.data.length  = 0;
+      iwe->u.data.pointer = NULL;
+      iwe->u.data.flags   = ap.security == 0 ? IW_ENCODE_DISABLED
+                                             : IW_ENCODE_ENABLED;
       used += iwe->len;
     }
 

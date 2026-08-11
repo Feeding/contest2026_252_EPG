@@ -907,16 +907,6 @@ const uint8_t *get_ie(const uint8_t *ies, size_t len, uint8_t eid)
   return NULL;
 }
 
-int get_security_type_from_ie(uint8_t *ie_start, int len, uint16_t caps)
-{
-  UNUSED(ie_start);
-  UNUSED(len);
-  UNUSED(caps);
-
-  BK7258_WIFI_PENDING("security type from IE");
-  return 0;
-}
-
 bool sta_check_user_is_11b_1mbps_supported(void)
 {
   return false;

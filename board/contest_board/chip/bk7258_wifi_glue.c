@@ -262,6 +262,226 @@ int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap)
   ap->ssid[sizeof(item->ssid)] = '\0';
   ap->channel = item->channel;
   ap->rssi    = item->level;
-  ap->caps    = item->caps;
+  ap->caps     = item->caps;
+  ap->security = item->security;
   return 0;
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_akm_cipher
+ *
+ * Description:
+ *   Pull the AKM suite and pairwise cipher selectors out of an RSN or WPA
+ *   information element.  Both have the same shape once the header is past:
+ *
+ *     RSN (EID 48):   version(2) groupcipher(4)
+ *                     pairwise_cnt(2) pairwise[](4) akm_cnt(2) akm[](4) ...
+ *     WPA (EID 221):  OUI(3) type(1) version(2) then the same
+ *
+ *   Only the last octet of each selector is returned, which is what
+ *   distinguishes the suites within a given OUI: for 00-0F-AC (RSN) 2 is
+ *   PSK and 8 is SAE on the AKM side, and 2 is TKIP and 4 is CCMP on the
+ *   cipher side; 00-50-F2 (WPA) uses the same numbering.  Selectors with a
+ *   foreign OUI are skipped rather than misread.
+ *
+ *   Every length is checked against the element's own end, because these
+ *   bytes come off the air from an unknown transmitter.
+ *
+ ****************************************************************************/
+
+#define BK7258_WIFI_OUI_RSN  0x00ac0f00u   /* 00-0F-AC, little-endian read */
+#define BK7258_WIFI_OUI_WPA  0x00f25000u   /* 00-50-F2 */
+
+static void bk7258_wifi_akm_cipher(const uint8_t *ie, size_t len,
+                                   size_t offset, uint32_t oui,
+                                   uint8_t *akm, uint8_t *cipher)
+{
+  uint16_t count;
+  size_t i;
+
+  *akm = 0;
+  *cipher = 0;
+
+  /* version(2) + group cipher(4) */
+
+  if (offset + 6 > len)
+    {
+      return;
+    }
+
+  offset += 6;
+
+  /* Pairwise cipher list */
+
+  if (offset + 2 > len)
+    {
+      return;
+    }
+
+  count = (uint16_t)(ie[offset] | (ie[offset + 1] << 8));
+  offset += 2;
+
+  for (i = 0; i < count; i++)
+    {
+      if (offset + 4 > len)
+        {
+          return;
+        }
+
+      if ((uint32_t)(ie[offset] | (ie[offset + 1] << 8) |
+                     (ie[offset + 2] << 16)) == (oui & 0x00ffffffu))
+        {
+          *cipher |= (uint8_t)(1u << (ie[offset + 3] & 7));
+        }
+
+      offset += 4;
+    }
+
+  /* AKM suite list */
+
+  if (offset + 2 > len)
+    {
+      return;
+    }
+
+  count = (uint16_t)(ie[offset] | (ie[offset + 1] << 8));
+  offset += 2;
+
+  for (i = 0; i < count; i++)
+    {
+      if (offset + 4 > len)
+        {
+          return;
+        }
+
+      if ((uint32_t)(ie[offset] | (ie[offset + 1] << 8) |
+                     (ie[offset + 2] << 16)) == (oui & 0x00ffffffu))
+        {
+          *akm |= (uint8_t)(1u << (ie[offset + 3] & 7));
+        }
+
+      offset += 4;
+    }
+}
+
+/****************************************************************************
+ * Name: get_security_type_from_ie
+ *
+ * Description:
+ *   Classify an AP's security from its beacon IEs.  rw_msg_rx.c:1030 calls
+ *   this for every scan result and stores the answer in the result item, so
+ *   with it stubbed every AP came back with a meaningless security type --
+ *   which is why "wapi scan_results" showed encode 0xffff for all of them.
+ *
+ *   The vendor's own version lives in the supplicant this port does not
+ *   build (wpa_supplicant-2.10/wpa_supplicant/events.c:533) and leans on
+ *   wpa_parse_wpa_ie_key_mgmt_and_pairwise_cipher() from wpa_common.c.
+ *   This is the same decision tree over a local parser: privacy bit clear
+ *   means open, RSN wins over the WPA vendor IE, SAE outranks PSK, CCMP
+ *   outranks TKIP, and privacy set with neither IE present is WEP.
+ *
+ ****************************************************************************/
+
+#define BK7258_WIFI_CAP_PRIVACY   (1u << 4)
+#define BK7258_WIFI_EID_RSN       48
+#define BK7258_WIFI_EID_VENDOR    221
+
+#define BK7258_WIFI_AKM_8021X     (1u << 1)   /* selector 1 */
+#define BK7258_WIFI_AKM_PSK       (1u << 2)   /* selector 2 */
+#define BK7258_WIFI_AKM_SAE       (1u << 0)   /* selector 8, & 7 == 0 */
+#define BK7258_WIFI_CIPHER_TKIP   (1u << 2)   /* selector 2 */
+#define BK7258_WIFI_CIPHER_CCMP   (1u << 4)   /* selector 4 */
+
+int get_security_type_from_ie(uint8_t *ie_start, int len, uint16_t caps)
+{
+  const uint8_t *rsn;
+  const uint8_t *wpa;
+  uint8_t akm;
+  uint8_t cipher;
+  size_t i;
+
+  if ((caps & BK7258_WIFI_CAP_PRIVACY) == 0)
+    {
+      return BK_SECURITY_TYPE_NONE;
+    }
+
+  if (ie_start == NULL || len <= 0)
+    {
+      return BK_SECURITY_TYPE_WEP;
+    }
+
+  rsn = get_ie(ie_start, (size_t)len, BK7258_WIFI_EID_RSN);
+  if (rsn != NULL)
+    {
+      bk7258_wifi_akm_cipher(rsn, 2 + rsn[1], 2, BK7258_WIFI_OUI_RSN,
+                             &akm, &cipher);
+
+      if ((akm & BK7258_WIFI_AKM_SAE) != 0)
+        {
+          return (akm & BK7258_WIFI_AKM_PSK) != 0 ?
+                 BK_SECURITY_TYPE_WPA3_WPA2_MIXED : BK_SECURITY_TYPE_WPA3_SAE;
+        }
+
+      if ((akm & BK7258_WIFI_AKM_PSK) != 0)
+        {
+          if ((cipher & BK7258_WIFI_CIPHER_CCMP) != 0 &&
+              (cipher & BK7258_WIFI_CIPHER_TKIP) != 0)
+            {
+              return BK_SECURITY_TYPE_WPA2_MIXED;
+            }
+
+          return (cipher & BK7258_WIFI_CIPHER_CCMP) != 0 ?
+                 BK_SECURITY_TYPE_WPA2_AES : BK_SECURITY_TYPE_WPA2_TKIP;
+        }
+
+      if ((akm & BK7258_WIFI_AKM_8021X) != 0)
+        {
+          return BK_SECURITY_TYPE_EAP;
+        }
+    }
+
+  /* The WPA element is a vendor element: 00-50-F2 with type 1. */
+
+  wpa = NULL;
+  for (i = 0; i + 2 <= (size_t)len; i += 2 + ie_start[i + 1])
+    {
+      if (ie_start[i] == BK7258_WIFI_EID_VENDOR && ie_start[i + 1] >= 4 &&
+          i + 2 + ie_start[i + 1] <= (size_t)len &&
+          ie_start[i + 2] == 0x00 && ie_start[i + 3] == 0x50 &&
+          ie_start[i + 4] == 0xf2 && ie_start[i + 5] == 0x01)
+        {
+          wpa = &ie_start[i];
+          break;
+        }
+    }
+
+  if (wpa != NULL)
+    {
+      bk7258_wifi_akm_cipher(wpa, 2 + wpa[1], 6, BK7258_WIFI_OUI_WPA,
+                             &akm, &cipher);
+
+      if ((akm & BK7258_WIFI_AKM_PSK) != 0)
+        {
+          if ((cipher & BK7258_WIFI_CIPHER_CCMP) != 0 &&
+              (cipher & BK7258_WIFI_CIPHER_TKIP) != 0)
+            {
+              return BK_SECURITY_TYPE_WPA_MIXED;
+            }
+
+          return (cipher & BK7258_WIFI_CIPHER_CCMP) != 0 ?
+                 BK_SECURITY_TYPE_WPA_AES : BK_SECURITY_TYPE_WPA_TKIP;
+        }
+
+      if ((akm & BK7258_WIFI_AKM_8021X) != 0)
+        {
+          return BK_SECURITY_TYPE_EAP;
+        }
+    }
+
+  if (rsn == NULL && wpa == NULL)
+    {
+      return BK_SECURITY_TYPE_WEP;
+    }
+
+  return BK_SECURITY_TYPE_NONE;
 }
