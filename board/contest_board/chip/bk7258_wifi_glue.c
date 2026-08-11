@@ -149,12 +149,22 @@ int bk7258_wifi_scan_start(void)
       vif_idx = cfm.inst_nbr;
     }
 
-  /* All-zero means: every supported channel, any BSSID, no SSID filter,
-   * no extra IEs.  rw_msg_send_scanu_req() reads freqs[0] == 0 as "use
+  /* All-zero means: every supported channel, no SSID filter, no extra IEs.
+   * rw_msg_send_scanu_req() reads freqs[0] == 0 as "use
    * rw_ieee80211_init_scan_chan()", which is the full channel list.
+   *
+   * The BSSID is the exception, and zeroing it was a real bug: the wildcard
+   * BSSID in 802.11 is broadcast, not all-zero.  rw_msg_send_scanu_req()
+   * copies this field into the request verbatim (rw_msg_tx.c:1046) and the
+   * LMAC filters received frames against it in scanu_frame_handler
+   * (0x0209062e..0x2090670), so an all-zero filter matches no real AP and
+   * every beacon is dropped after being counted.  That is exactly what the
+   * board reported once the receiver started working: recv_cnt=39 with
+   * upload_cnt=0.
    */
 
   os_memset(&param, 0, sizeof(param));
+  os_memset(&param.bssid, 0xff, sizeof(param.bssid));
   param.vif_idx = vif_idx;
 
   return rw_msg_send_scanu_req(&param) == 0 ? 0 : -1;
