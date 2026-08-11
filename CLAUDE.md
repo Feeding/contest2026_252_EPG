@@ -200,7 +200,14 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    ⚠️ **此前"卡在 `sm_task.h` / `ps.h` 两个没发布头文件"的结论是错的,已撤回。** 那两个 `#include` 都在 `#if NX_VERSION > NX_VERSION_PACK(6,22,0,0)` 里,而本树是 6.8.2.0,预处理器根本走不到。错因是 grep 到 include 行就下结论、没看它被什么守着。`components/bk_wifi/src` 的 **33 个源文件按发布原样全部编过**,不需要向厂商索要任何东西。同批被推翻的还有"`bk_idk` 是声网定制裁剪版"(`git remote` 是 `bekencorp/bk_idk`,两份 SDK 都是官方版)。
 
-   **已上板验证**:`configs/xts` 里 `CONFIG_BK7258_WIFI` + `CONFIG_BK7258_WIFI_VENDOR` 打开后,控制台会打出闭源 MAC 自己的 `IP Rev: 802.11ax` 和 `mm_bcn_loss_info: ...`,随后在 `mm_init` 内部硬故障(`CFSR=0x01000000`,UsageFault 的 UNALIGNED 位)。**尚不能收发**。
+   **已上板验证:扫描跑通,`configs/xts` 实测搜到 22 个 AP**(`scanu_confirm: upload_cnt=49, recv_cnt=49, result=22`)。此前"跑到 `mm_init` 硬故障、尚不能收发"的记录已过时。让接收从零变成有,靠的是两条,**两条都是本移植自己的缺陷,不是厂商库的问题**:
+
+   - **`ate_is_enabled()` 答 false 会把 MAC 停进 doze。** `rwnx_intf_init` 在 `wifi_init()` 末尾的 `!ate_is_enabled()` 分支里调 `rwnxl_sleep()` + `ps_env_set_ps_on(true)`,而本移植在 WiFi 核心线程之外没有唤醒机制。厂商的射频工具都在 ATE 模式下跑,所以从不碰到。开关是 `CONFIG_BK7258_WIFI_ATE`(**default n**,只在 `configs/xts` 打开)+ 运行时 `bk7258_wifi_ate_enable()`,必须在 `bk7258_wifi_ifup()` 之前设。四个调用点都读过,ATE=true 只会让协议栈更宽松,**不存在**"需要外接测试仪器"那回事(旧注释是猜的,已撤)。
+   - **扫描请求的通配 BSSID 是广播,不是全零。** `bk7258_wifi_scan_start()` 原来把 `SCAN_PARAM_T` 整个清零,注释还写着"全零=任意 BSSID"。`rw_msg_send_scanu_req()` 原样透传(`rw_msg_tx.c:1046`),`scanu_frame_handler` 拿它逐字节比对每一帧、**先计数再丢弃**,于是 `recv_cnt=39 / upload_cnt=0`。厂商 supplicant 驱动写得很明白:`params->bssid ? params->bssid : broadcast_ether_addr`(`driver_beken.c:1902`)。
+
+   **诊断纪律(这一段是花了好几轮才换来的)**:电源域、时钟门控、RC 状态位、RX 描述符环、MPIF —— 全部量过,**全部本来就是对的**。真正点破问题的是厂商自己的断言 `MAC is in doze, open maccore and phy clock`。`src/bkreg.c` 留在树里,预设一条命令解码那四个关键寄存器并把极性直接写成 on/OFF(`0x44010040` 是掉电位,已经被读反过一次)。
+
+   **还没通**:`wapi scan_results wlan0` 一条都不打,尽管 ioctl 报 21 条。两个嫌疑都在我们自己的 `bk7258_wifi_scan_results()` 里,见 `07059cd` 提交说明。
 
    三个必须做对、做错都不报错的接缝(全部已实现,见 `chip/bk7258_wifi_shim.c` 头注释的 REAL/ADEQUATE/PENDING 分类):
    - **`bk_wifi_init()` 带 config 参数**。手写 `extern int bk_wifi_init(void)` 能编能链,厂商那句专防此事的 `config->os_funcs == NULL` 检查会被寄存器残留值躲过,故障出现在三十层之后的闭源代码里。凡是厂商 API 一律用它自己的头,别凭记忆写原型。
