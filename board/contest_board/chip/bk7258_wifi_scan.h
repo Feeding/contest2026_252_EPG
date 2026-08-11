@@ -43,11 +43,28 @@ struct bk7258_scan_ap_s
 
 int bk7258_wifi_scan_start(void);
 
-/* How many APs the last completed scan found. */
+/* How many APs the last completed scan found.  Touches no reference count,
+ * so it is safe to call without holding the set.
+ */
 
 int bk7258_wifi_scan_count(void);
 
-/* Copy entry 'index' out.  Returns 0 on success, -1 if it does not exist. */
+/* Hold the vendor's result set for one enumeration, and let it go again.
+ *
+ * These must bracket every use of bk7258_wifi_scan_get(): the vendor's
+ * sr_get/sr_release pair is a reference count, not a lock, and dropping the
+ * last reference frees every result and nulls the global.  Acquiring per
+ * item therefore destroys the list on the first item -- see the note in
+ * bk7258_wifi_glue.c.  Acquire returns the entry count, or 0 if there is
+ * nothing to hold; release is safe either way.
+ */
+
+int bk7258_wifi_scan_acquire(void);
+void bk7258_wifi_scan_release(void);
+
+/* Copy entry 'index' out.  Returns 0 on success, -1 if it does not exist.
+ * Only valid between acquire and release.
+ */
 
 int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap);
 

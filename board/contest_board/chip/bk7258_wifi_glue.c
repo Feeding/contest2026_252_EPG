@@ -172,43 +172,96 @@ int bk7258_wifi_scan_start(void)
 
 int bk7258_wifi_scan_count(void)
 {
+  /* Reads scan_rst_set_ptr->scanu_num under a critical section and touches
+   * no reference count, so it is safe to call at any time.
+   */
+
   return (int)sr_get_scan_number();
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_scan_acquire / _release / _get
+ *
+ * Description:
+ *   Read the vendor's scan result set without taking a reference on it.
+ *
+ *   sr_get_scan_results() / sr_release_scan_results() look like a lock and
+ *   are not one -- they are a reference count, and rw_msg_rx.c:199 destroys
+ *   everything when it reaches zero:
+ *
+ *       ptr->ref -= 1;
+ *       if (ptr->ref) goto release_exit;
+ *       sr_free_all(ptr);
+ *       scan_rst_set_ptr = 0;
+ *
+ *   The set is created by SCANU_RESULT_IND with ref 0 (rw_msg_rx.c:1330) and
+ *   is meant to live until the *next* scan flushes it or a connect does
+ *   (:1322, :1350).  So any balanced get/release by a reader takes it 0 -> 1
+ *   -> 0 and frees the results it was trying to read.  That is not a bug in
+ *   the pairing, it is what the pairing is for: hostapd_intf.c:549 takes its
+ *   reference and holds it for the whole upload precisely so that its
+ *   eventual release is the consuming one.
+ *
+ *   This port only wants to look.  Two versions got this wrong before
+ *   settling here -- first a get/release around every item, then one around
+ *   the whole enumeration -- and both freed the list, because with ref
+ *   starting at 0 it makes no difference where you put the pair.  On the
+ *   board it showed as wapi's two ioctls reporting 23 results and then 0:
+ *   the first is wapi_scan_stat()'s one-byte probe, whose only job is to ask
+ *   whether results exist.
+ *
+ *   So read the global directly and touch no counter, which is exactly what
+ *   the vendor's own sr_get_scan_number() does (rw_msg_rx.c:161).  It is not
+ *   declared in any header, hence the extern here.
+ *
+ *   Acquire/release remain as a pair so the caller still brackets its walk
+ *   and so this decision has somewhere to live; they cache and drop the
+ *   pointer, nothing more.
+ *
+ ****************************************************************************/
+
+extern SCAN_RST_UPLOAD_T *scan_rst_set_ptr;
+
+static SCAN_RST_UPLOAD_T *g_bk7258_scan_set;
+
+int bk7258_wifi_scan_acquire(void)
+{
+  g_bk7258_scan_set = scan_rst_set_ptr;
+  if (g_bk7258_scan_set == NULL)
+    {
+      return 0;
+    }
+
+  return (int)g_bk7258_scan_set->scanu_num;
+}
+
+void bk7258_wifi_scan_release(void)
+{
+  g_bk7258_scan_set = NULL;
 }
 
 int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap)
 {
-  SCAN_RST_UPLOAD_T *set;
   SCAN_RST_ITEM_T *item;
-  int ret = -1;
 
-  if (ap == NULL || index < 0)
+  if (ap == NULL || index < 0 || g_bk7258_scan_set == NULL)
     {
       return -1;
     }
 
-  /* sr_get_scan_results() takes a reference; it has to be released or the
-   * next scan cannot free the set.
-   */
-
-  set = (SCAN_RST_UPLOAD_T *)sr_get_scan_results();
-  if (set == NULL)
+  if (index >= g_bk7258_scan_set->scanu_num ||
+      g_bk7258_scan_set->res[index] == NULL)
     {
       return -1;
     }
 
-  if (index < set->scanu_num && set->res[index] != NULL)
-    {
-      item = set->res[index];
+  item = g_bk7258_scan_set->res[index];
 
-      os_memcpy(ap->bssid, item->bssid, sizeof(ap->bssid));
-      os_memcpy(ap->ssid, item->ssid, sizeof(item->ssid));
-      ap->ssid[sizeof(item->ssid)] = '\0';
-      ap->channel = item->channel;
-      ap->rssi    = item->level;
-      ap->caps    = item->caps;
-      ret = 0;
-    }
-
-  sr_release_scan_results(set);
-  return ret;
+  os_memcpy(ap->bssid, item->bssid, sizeof(ap->bssid));
+  os_memcpy(ap->ssid, item->ssid, sizeof(item->ssid));
+  ap->ssid[sizeof(item->ssid)] = '\0';
+  ap->channel = item->channel;
+  ap->rssi    = item->level;
+  ap->caps    = item->caps;
+  return 0;
 }

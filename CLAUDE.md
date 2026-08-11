@@ -207,7 +207,14 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    **诊断纪律(这一段是花了好几轮才换来的)**:电源域、时钟门控、RC 状态位、RX 描述符环、MPIF —— 全部量过,**全部本来就是对的**。真正点破问题的是厂商自己的断言 `MAC is in doze, open maccore and phy clock`。`src/bkreg.c` 留在树里,预设一条命令解码那四个关键寄存器并把极性直接写成 on/OFF(`0x44010040` 是掉电位,已经被读反过一次)。
 
-   **还没通**:`wapi scan_results wlan0` 一条都不打,尽管 ioctl 报 21 条。两个嫌疑都在我们自己的 `bk7258_wifi_scan_results()` 里,见 `07059cd` 提交说明。
+   **`wapi scan_results wlan0` 也已跑通**,标准 NuttX 无线 API 直出 BSSID / 频率 / 信号 / SSID(中文 SSID 正常)。这一段又是两个本移植自己的缺陷:
+
+   - **`sr_get_scan_results()` / `sr_release_scan_results()` 不是锁,是引用计数**,而且结果集诞生时 `ref == 0`(`rw_msg_rx.c:1330`),设计上活到**下一次扫描**或连接才被冲掉(`:1322`)。所以读取方只要成对 get/release,就会把 `ref` 从 0 抬到 1 再落回 0,`sr_free_all()` 当场把结果全释放。放每项外面、放整个遍历外面都一样错(两版都试过)。**只读就别碰计数器**——直接读全局 `scan_rst_set_ptr`,厂商自己的 `sr_get_scan_number()` 就是这么干的。
+   - **SSID 必须内联在缓冲区里**,`u.essid.pointer` 存的是**偏移**不是地址:`wapi_event_stream_extract()` 按 `current + offsetof(iw_event,u) + pointer` 还原(`apps/wireless/wapi/src/wireless.c:296`)。原来存的是栈上局部变量地址。照抄公共仓 `bcmf_driver.c:1065` 的写法即可,`len = IW_EV_LEN(essid) + 4字节对齐(ssid_len)`。
+
+   另外 `wapi_scan_stat()` 会先用**一个字节**的缓冲区探一次,靠 `-E2BIG` / `-EAGAIN` 区分"有结果"和"还没好";返回 `OK` + 截断流会让它以为一个字节就够了。
+
+   **仍未做**:`encode` 字段恒为 `0xffff`(没发 `SIOCGIWENCODE`,`ap.caps` 已经拿到了,补一下即可);关联/收发数据尚未验证。
 
    三个必须做对、做错都不报错的接缝(全部已实现,见 `chip/bk7258_wifi_shim.c` 头注释的 REAL/ADEQUATE/PENDING 分类):
    - **`bk_wifi_init()` 带 config 参数**。手写 `extern int bk_wifi_init(void)` 能编能链,厂商那句专防此事的 `config->os_funcs == NULL` 检查会被寄存器残留值躲过,故障出现在三十层之后的闭源代码里。凡是厂商 API 一律用它自己的头,别凭记忆写原型。

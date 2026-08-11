@@ -540,6 +540,7 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
   struct bk7258_scan_ap_s ap;
   FAR char *buf;
   size_t used = 0;
+  size_t len;
   int count;
   int i;
 
@@ -582,6 +583,46 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
       return -EAGAIN;
     }
 
+  /* One reference for the whole enumeration.  Taking and dropping it per
+   * item frees the vendor's result set on the first drop -- see
+   * bk7258_wifi_scan_acquire() in bk7258_wifi_glue.c.
+   */
+
+  count = bk7258_wifi_scan_acquire();
+  if (count <= 0)
+    {
+      bk7258_wifi_scan_release();
+      return -EAGAIN;
+    }
+
+  /* Size the answer first.  wapi asks twice: wapi_scan_stat() probes with a
+   * one-byte buffer purely to learn whether results exist, and treats -E2BIG
+   * as "ready" and -EAGAIN as "not yet"; wapi_scan_coll() then doubles its
+   * buffer and retries for as long as it keeps getting -E2BIG
+   * (apps/wireless/wapi/src/wireless.c:1289 and :1371).  Returning OK with a
+   * truncated stream instead, as this used to, tells the probe that a
+   * one-byte buffer was enough and loses every result.
+   */
+
+  len = 0;
+  for (i = 0; i < count; i++)
+    {
+      if (bk7258_wifi_scan_get(i, &ap) != 0)
+        {
+          continue;
+        }
+
+      len += IW_EV_LEN(ap_addr) + IW_EV_LEN(freq) + IW_EV_LEN(qual) +
+             IW_EV_LEN(essid) + ((strnlen(ap.ssid, 32) + 3) & ~3);
+    }
+
+  if (iwr->u.data.length < len)
+    {
+      iwr->u.data.length = len;
+      bk7258_wifi_scan_release();
+      return -E2BIG;
+    }
+
   buf = (FAR char *)iwr->u.data.pointer;
 
   for (i = 0; i < count; i++)
@@ -591,17 +632,6 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
           continue;
         }
 
-      /* Each record is IW_EV_LEN(field) long, and the reader walks the
-       * buffer by those lengths -- so a partial record at the end is worse
-       * than a short list.  Stop cleanly instead.
-       */
-
-      if (used + IW_EV_LEN(ap_addr) + IW_EV_LEN(essid) +
-          IW_EV_LEN(freq) + IW_EV_LEN(qual) > iwr->u.data.length)
-        {
-          break;
-        }
-
       iwe = (FAR struct iw_event *)&buf[used];
       iwe->len = IW_EV_LEN(ap_addr);
       iwe->cmd = SIOCGIWAP;
@@ -609,12 +639,24 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
       memcpy(iwe->u.ap_addr.sa_data, ap.bssid, IFHWADDRLEN);
       used += iwe->len;
 
+      /* The SSID travels inline, immediately after the iw_point, and
+       * u.essid.pointer carries the offset to it rather than an address:
+       * wapi_event_stream_extract() computes the real pointer as
+       * "current + offsetof(struct iw_event, u) + (unsigned long)pointer"
+       * (wireless.c:296).  This used to store &ap.ssid, the address of a
+       * stack local that is reused every iteration and gone by the time the
+       * caller looks -- so wapi added a stack address to its own buffer base
+       * and read from somewhere arbitrary.  Same encoding as the in-tree
+       * bcm43xxx driver (bcmf_driver.c:1065).
+       */
+
       iwe = (FAR struct iw_event *)&buf[used];
-      iwe->len = IW_EV_LEN(essid);
       iwe->cmd = SIOCGIWESSID;
-      iwe->u.essid.length  = strnlen(ap.ssid, 32);
       iwe->u.essid.flags   = 1;
-      iwe->u.essid.pointer = (FAR void *)(uintptr_t)ap.ssid;
+      iwe->u.essid.length  = strnlen(ap.ssid, 32);
+      iwe->u.essid.pointer = (FAR void *)sizeof(iwe->u.essid);
+      memcpy(&iwe->u.essid + 1, ap.ssid, iwe->u.essid.length);
+      iwe->len = IW_EV_LEN(essid) + ((iwe->u.essid.length + 3) & ~3);
       used += iwe->len;
 
       iwe = (FAR struct iw_event *)&buf[used];
@@ -634,6 +676,8 @@ static int bk7258_wifi_scan(FAR struct netdev_lowerhalf_s *dev,
       iwe->u.qual.updated = IW_QUAL_DBM;
       used += iwe->len;
     }
+
+  bk7258_wifi_scan_release();
 
   iwr->u.data.length = used;
   return OK;
