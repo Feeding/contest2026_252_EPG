@@ -170,6 +170,76 @@ int bk7258_wifi_scan_start(void)
   return rw_msg_send_scanu_req(&param) == 0 ? 0 : -1;
 }
 
+/****************************************************************************
+ * Name: bk7258_wifi_connect_open
+ *
+ * Description:
+ *   Associate with an AP, without the supplicant.
+ *
+ *   Same seam as bk7258_wifi_scan_start(): bk_wifi_sta_connect() goes
+ *   through wpa_ctrl_request(), which this port stubs out, so this drops to
+ *   the layer underneath.  sa_station_send_associate_cmd() (sa_station.c:52,
+ *   the !CONFIG_SME branch -- CONFIG_SME is not set in the vendor
+ *   sdkconfig.h this build uses) looks the SSID up in the scan results with
+ *   scanu_search_by_ssid(), takes the channel from there, and issues
+ *   SM_CONNECT_REQ.
+ *
+ *   Two consequences of that lookup worth knowing before reading a failure:
+ *   a scan has to have run, and the AP has to still be in its results -- the
+ *   set is discarded on the next scan or on connect (rw_msg_rx.c:1322,
+ *   :1350), so "connect" means "connect to something the last scan saw".
+ *
+ *   WHAT THIS DOES NOT DO IS THE HANDSHAKE.  ie_len is zero, so the request
+ *   carries no RSN element and nothing performs the EAPOL four-way exchange
+ *   afterwards -- that is the supplicant's job and the supplicant is not
+ *   ported.  Against an open AP that is the whole story and the link comes
+ *   up.  Against WPA2 the association itself can still succeed, and then the
+ *   AP deauthenticates when the handshake never arrives, which looks like a
+ *   connection that works for a second or two.  Do not read that as success.
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status)
+{
+  CONNECT_PARAM_T param;
+  int ret;
+
+  if (ssid == NULL || ssid_len <= 0 || ssid_len > MAC_SSID_LEN)
+    {
+      return -1;
+    }
+
+  os_memset(&param, 0, sizeof(param));
+
+  param.ssid.length = (uint8_t)ssid_len;
+  os_memcpy(param.ssid.array, ssid, ssid_len);
+
+  /* Broadcast BSSID: any radio advertising this SSID will do.  Same wildcard
+   * rule the scan request needed -- all-zero is a literal address here, not
+   * "don't care".
+   */
+
+  os_memset(&param.bssid, 0xff, sizeof(param.bssid));
+
+  /* freq 0 selects the "normal case" branch, i.e. look the channel up from
+   * the scan results rather than fast-connect to a remembered one.
+   */
+
+  param.chan.freq = 0;
+  param.auth_type = 0;            /* open system */
+  param.ie_len    = 0;
+  param.bcn_len   = 0;
+
+  ret = sa_station_send_associate_cmd(&param);
+
+  if (status != NULL)
+    {
+      *status = ret;
+    }
+
+  return ret;
+}
+
 int bk7258_wifi_scan_count(void)
 {
   /* Reads scan_rst_set_ptr->scanu_num under a critical section and touches

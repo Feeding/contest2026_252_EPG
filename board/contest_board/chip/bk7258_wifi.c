@@ -316,10 +316,36 @@ static int bk7258_wifi_connect(FAR struct netdev_lowerhalf_s *dev)
 {
   FAR struct bk7258_wifi_dev_s *priv = (FAR struct bk7258_wifi_dev_s *)dev;
 
+  int status = 0;
+  int ret;
+
   ninfo("connect: ssid '%.*s' auth %" PRIu32 " mode %" PRIu32 "\n",
         priv->ssid_len, priv->ssid, priv->auth, priv->mode);
 
-  return -ENOSYS;
+  if (priv->ssid_len == 0)
+    {
+      return -EINVAL;
+    }
+
+  ret = bk7258_wifi_connect_open(priv->ssid, priv->ssid_len, &status);
+
+  syslog(LOG_INFO, "wifi: connect '%.*s' -> %d (status %d)\n",
+         priv->ssid_len, priv->ssid, ret, status);
+
+  if (ret != 0)
+    {
+      return -EIO;
+    }
+
+  /* Association succeeded.  Carrier stays down until the link is genuinely
+   * usable, and for anything but an open AP it is not: no RSN element went
+   * out and nothing runs the EAPOL exchange, so the AP will drop us.  The
+   * SM_CONNECT_IND that would tell us which happened is not wired up yet,
+   * so report the association and leave the carrier alone rather than
+   * claiming a link this port cannot yet stand behind.
+   */
+
+  return OK;
 }
 
 static int bk7258_wifi_disconnect(FAR struct netdev_lowerhalf_s *dev)

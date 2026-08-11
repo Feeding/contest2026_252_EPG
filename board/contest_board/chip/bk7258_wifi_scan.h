@@ -44,6 +44,14 @@ struct bk7258_scan_ap_s
 
 int bk7258_wifi_scan_start(void);
 
+/* Associate with an AP by SSID, using the last scan's results to find its
+ * channel.  Open system only: no RSN element is sent and no EAPOL handshake
+ * follows, because the supplicant is not ported.  Returns 0 when the MAC
+ * accepted the association.
+ */
+
+int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status);
+
 /* How many APs the last completed scan found.  Touches no reference count,
  * so it is safe to call without holding the set.
  */
