@@ -63,8 +63,20 @@
 #include <nuttx/net/netdev_lowerhalf.h>
 #include <nuttx/wireless/wireless.h>
 
+#include <nuttx/signal.h>
+
 #include "bk7258_wifi.h"
 #include "bk7258_wifi_scan.h"
+
+/* How long to wait for SM_CONNECT_IND before giving up on an association,
+ * and how often to look.  Three seconds is well past what an AP on the same
+ * channel needs -- the measured auth+assoc exchange completed in tens of
+ * milliseconds -- and short enough that a shell blocked on "wapi essid"
+ * comes back rather than appearing hung.
+ */
+
+#define BK7258_WIFI_CONNECT_TIMEOUT_MS  3000
+#define BK7258_WIFI_CONNECT_POLL_MS     50
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -213,6 +225,7 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
       extern int bk7258_wifi_vendor_init(void);
       extern void bk7258_wifi_zeroing(bool on);
       static bool phy_ready = false;
+      uint8_t mac[IFHWADDRLEN];
       int ret;
 
       /* The radio's OS abstraction, before anything reaches the radio.
@@ -256,6 +269,28 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
         {
           nerr("ERROR: bk_wifi_init: %d\n", ret);
           return -EIO;
+        }
+
+      /* Adopt the address the radio actually uses.  Until this ran, wlan0
+       * came up with d_mac all zeroes while the MAC associated as its real
+       * address -- so every ARP reply and DHCP request the stack built
+       * carried a source address no AP would ever send a frame back to.
+       * Nothing else in this port writes d_mac: netinit's assignment path
+       * is compiled out in both configurations.
+       *
+       * It has to happen here rather than in initialize(), because the
+       * address is only meaningful once bk_wifi_init() has run.
+       */
+
+      if (bk7258_wifi_get_mac(mac) == 0)
+        {
+          memcpy(dev->netdev.d_mac.ether.ether_addr_octet, mac, IFHWADDRLEN);
+          ninfo("wlan0 mac %02x:%02x:%02x:%02x:%02x:%02x\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
+      else
+        {
+          nerr("ERROR: could not read the station MAC\n");
         }
 
       ninfo("vendor WiFi stack initialised\n");
@@ -317,7 +352,9 @@ static int bk7258_wifi_connect(FAR struct netdev_lowerhalf_s *dev)
   FAR struct bk7258_wifi_dev_s *priv = (FAR struct bk7258_wifi_dev_s *)dev;
 
   int status = 0;
+  int state = -1;
   int ret;
+  int i;
 
   ninfo("connect: ssid '%.*s' auth %" PRIu32 " mode %" PRIu32 "\n",
         priv->ssid_len, priv->ssid, priv->auth, priv->mode);
@@ -327,7 +364,8 @@ static int bk7258_wifi_connect(FAR struct netdev_lowerhalf_s *dev)
       return -EINVAL;
     }
 
-  ret = bk7258_wifi_connect_open(priv->ssid, priv->ssid_len, &status);
+  ret = bk7258_wifi_connect_open((FAR const char *)priv->ssid,
+                                 priv->ssid_len, &status);
 
   syslog(LOG_INFO, "wifi: connect '%.*s' -> %d (status %d)\n",
          priv->ssid_len, priv->ssid, ret, status);
@@ -337,15 +375,58 @@ static int bk7258_wifi_connect(FAR struct netdev_lowerhalf_s *dev)
       return -EIO;
     }
 
-  /* Association succeeded.  Carrier stays down until the link is genuinely
-   * usable, and for anything but an open AP it is not: no RSN element went
-   * out and nothing runs the EAPOL exchange, so the AP will drop us.  The
-   * SM_CONNECT_IND that would tell us which happened is not wired up yet,
-   * so report the association and leave the carrier alone rather than
-   * claiming a link this port cannot yet stand behind.
+  /* The request was accepted; that is not the same as being associated.
+   * sa_station_send_associate_cmd() returns once SM_CONNECT_CFM says the
+   * MAC took the request, and the outcome arrives later as SM_CONNECT_IND.
+   *
+   * Wait for it rather than guessing.  bk7258_wifi_link_state() reads the
+   * state the closed MAC maintains through its own adapter callback, so it
+   * reports what the LMAC saw -- association, or the deauth that follows a
+   * WPA2 AP when no handshake arrives -- and not what the unported
+   * supplicant thinks.  See the note in bk7258_wifi_glue.c for why the two
+   * more obvious vendor APIs cannot be used here.
+   *
+   * Bounded, because this runs in the caller's ioctl context: wapi blocks
+   * on it, and an unbounded wait against an AP that simply ignores us would
+   * hang the shell.
    */
 
-  return OK;
+  for (i = 0; i < BK7258_WIFI_CONNECT_TIMEOUT_MS /
+                  BK7258_WIFI_CONNECT_POLL_MS; i++)
+    {
+      state = bk7258_wifi_link_state();
+
+      if (state == BK7258_WIFI_LINK_CONNECTED)
+        {
+          priv->connected = true;
+
+          /* Only now is the link real, so only now does the carrier go up.
+           * Until this call netdev_findbyaddr() and netdev_default() skip
+           * wlan0 entirely -- they require IFF_RUNNING -- so nothing the
+           * stack sends could ever reach transmit().
+           */
+
+          netdev_lower_carrier_on(dev);
+
+          syslog(LOG_INFO, "wifi: connected to '%.*s'\n",
+                 priv->ssid_len, priv->ssid);
+          return OK;
+        }
+
+      if (state == BK7258_WIFI_LINK_CONNECT_FAILED ||
+          state == BK7258_WIFI_LINK_DISCONNECTED)
+        {
+          syslog(LOG_ERR, "wifi: association to '%.*s' rejected (state %d)\n",
+                 priv->ssid_len, priv->ssid, state);
+          return -ECONNREFUSED;
+        }
+
+      nxsig_usleep(BK7258_WIFI_CONNECT_POLL_MS * 1000);
+    }
+
+  syslog(LOG_ERR, "wifi: '%.*s' never reached CONNECTED (last state %d)\n",
+         priv->ssid_len, priv->ssid, state);
+  return -ETIMEDOUT;
 }
 
 static int bk7258_wifi_disconnect(FAR struct netdev_lowerhalf_s *dev)

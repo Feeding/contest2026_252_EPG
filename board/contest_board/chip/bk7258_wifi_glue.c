@@ -240,6 +240,75 @@ int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status)
   return ret;
 }
 
+/****************************************************************************
+ * Name: bk7258_wifi_get_mac
+ *
+ * Description:
+ *   The station's MAC address, as the vendor stack actually uses it on air.
+ *
+ *   This has to come from the vendor rather than from the shim's
+ *   g_bk7258_base_mac, even though the two currently agree: the base address
+ *   is what we hand the stack, and what it derives per interface from that
+ *   is its business.  Reading it back is the only way to be sure the netdev
+ *   and the radio claim the same address.
+ *
+ *   Valid only after bk_wifi_init(), i.e. after bk7258_wifi_vendor_init().
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_get_mac(uint8_t *mac)
+{
+  if (mac == NULL)
+    {
+      return -1;
+    }
+
+  return bk_wifi_sta_get_mac(mac) == BK_OK ? 0 : -1;
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_link_state
+ *
+ * Description:
+ *   Report the station link state, without the supplicant.
+ *
+ *   Two vendor APIs look like they answer this and only one of them can be
+ *   used here:
+ *
+ *     wlan_sta_state()               -> wpa_ctrl_request(), which this port
+ *                                       stubs out.  Always fails.
+ *     bk_wifi_sta_get_link_status()  -> gates on wifi_sta_is_connected(),
+ *                                       which reads s_wifi_state_bits, set
+ *                                       only along the supplicant-driven
+ *                                       bk_wifi_sta_connect() path we do not
+ *                                       take.  Would always say
+ *                                       DISCONNECTED.
+ *
+ *   bk_wifi_sta_get_linkstate_with_reason() has neither problem: it returns
+ *   mhdr_get_station_status() directly (wifi_v2.c:2718-2725), and that state
+ *   is written by the closed MAC itself through the adapter table entry
+ *   bk_set_sta_status_wrapper (bk_wifi_adapter.c:215-218).  So it reflects
+ *   what the LMAC saw -- SM_CONNECT_IND, a deauth, a disassoc -- rather than
+ *   what a supplicant we do not run believes.
+ *
+ * Returned Value:
+ *   A wifi_link_state_t value; WIFI_LINKSTATE_STA_CONNECTED (3) is up.
+ *   Negative on error.
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_link_state(void)
+{
+  wifi_linkstate_reason_t info;
+
+  if (bk_wifi_sta_get_linkstate_with_reason(&info) != BK_OK)
+    {
+      return -1;
+    }
+
+  return (int)info.state;
+}
+
 int bk7258_wifi_scan_count(void)
 {
   /* Reads scan_rst_set_ptr->scanu_num under a critical section and touches

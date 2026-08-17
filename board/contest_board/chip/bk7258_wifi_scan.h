@@ -52,6 +52,25 @@ int bk7258_wifi_scan_start(void);
 
 int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status);
 
+/* The station MAC as the vendor stack uses it on air.  Valid only after
+ * bk7258_wifi_vendor_init().  Returns 0 on success.
+ */
+
+int bk7258_wifi_get_mac(uint8_t *mac);
+
+/* Station link state, read from the state the closed MAC maintains rather
+ * than from the unported supplicant.  Returns a wifi_link_state_t; 3 is
+ * WIFI_LINKSTATE_STA_CONNECTED.  Negative on error.
+ */
+
+#define BK7258_WIFI_LINK_IDLE           0
+#define BK7258_WIFI_LINK_CONNECTING     1
+#define BK7258_WIFI_LINK_DISCONNECTED   2
+#define BK7258_WIFI_LINK_CONNECTED      3
+#define BK7258_WIFI_LINK_CONNECT_FAILED 4
+
+int bk7258_wifi_link_state(void);
+
 /* How many APs the last completed scan found.  Touches no reference count,
  * so it is safe to call without holding the set.
  */
