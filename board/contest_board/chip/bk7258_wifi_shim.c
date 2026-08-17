@@ -165,9 +165,6 @@ static uint8_t g_bk7258_base_mac[6] =
   0x02, 0x0b, 0x77, 0x00, 0x00, 0x01
 };
 
-static uint32_t g_bk7258_wifi_rx_frames;
-static uint32_t g_bk7258_wifi_rx_bytes;
-
 /****************************************************************************
  * Fault probe
  *
@@ -640,35 +637,6 @@ bool ate_is_enabled(void)
 void bk7258_wifi_ate_enable(bool enable)
 {
   g_bk7258_ate_enabled = enable;
-}
-
-/****************************************************************************
- * Name: bk7258_wifi_rx_frame
- *
- * Description:
- *   Where received frames arrive from the vendor stack, handed across from
- *   ethernetif_input() in bk7258_wifi_pbuf.c.
- *
- *   For now this counts and drops.  That is not a placeholder for its own
- *   sake: the netdev lower half in bk7258_wifi.c has no RX queue yet, and
- *   the honest order of work is to see the stack actually deliver a frame
- *   before designing the queue that holds it.  The counters make that
- *   visible from the console the moment it happens.
- *
- ****************************************************************************/
-
-void bk7258_wifi_rx_frame(int iface, const void *data, unsigned int len)
-{
-  UNUSED(data);
-
-  g_bk7258_wifi_rx_frames++;
-  g_bk7258_wifi_rx_bytes += len;
-
-  if (g_bk7258_wifi_rx_frames == 1)
-    {
-      syslog(LOG_INFO, "wifi: first RX frame, iface %d, %u bytes\n",
-             iface, len);
-    }
 }
 
 /****************************************************************************

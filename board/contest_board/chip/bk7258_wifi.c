@@ -112,7 +112,23 @@ struct bk7258_wifi_dev_s
   uint32_t auth;                    /* IW_AUTH_WPA_VERSION_* */
   uint32_t mode;                    /* IW_MODE_INFRA or IW_MODE_MASTER */
   bool     connected;
+
+  /* RX ring.  Filled by bk7258_wifi_rx_frame() on the vendor core thread,
+   * drained by receive() on the network worker.  Sized to twice the RX
+   * quota although quota alone bounds the occupancy at 8: netpkt_alloc()
+   * refuses to allocate past the quota, and every allocated packet is
+   * either in this ring or already handed to the upper half.  The slack
+   * costs 32 bytes and turns "can never overflow" from an argument into
+   * an array bound.
+   */
+
+  FAR netpkt_t *rxq[BK7258_WIFI_RX_QUOTA * 2];
+  uint8_t  rxhead;                  /* Next slot to fill */
+  uint8_t  rxtail;                  /* Next slot to drain */
+  uint32_t rxdrops;                 /* Frames dropped for want of quota */
 };
+
+#define BK7258_WIFI_RXQ_MASK  (BK7258_WIFI_RX_QUOTA * 2 - 1)
 
 /****************************************************************************
  * Private Function Prototypes
@@ -312,19 +328,64 @@ static int bk7258_wifi_ifdown(FAR struct netdev_lowerhalf_s *dev)
  * Name: bk7258_wifi_transmit
  *
  * Description:
- *   Hand one frame to the MAC.  Ownership of pkt passes to us on success;
- *   on failure the upper half keeps it and will retry, so it must not be
- *   freed here.
+ *   Hand one ethernet frame to the MAC.
+ *
+ *   Ownership: on OK the packet is ours and we must netpkt_free() it; on a
+ *   negative return the upper half recycles it and does NOT retry -- it
+ *   bumps TXERRORS, puts the iob back and aborts the current poll
+ *   (netdev_upperhalf.c:315-325).  An earlier comment here claimed it
+ *   retried; it does not, which is why a vendor-side drop is reported as
+ *   OK-and-dropped below rather than as an error the stack cannot act on.
+ *
+ *   The frame is always copied out rather than handed over by pointer, for
+ *   two reasons that would each suffice.  NETPKT_BUFLEN is
+ *   CONFIG_IOB_BUFSIZE = 196 in this build, so any full-size frame is
+ *   fragmented across iobs and netpkt_getdata() would see only the first
+ *   piece.  And the vendor consumes a pbuf whose payload must be preceded
+ *   by CONFIG_MSDU_RESV_HEAD_LENGTH (96) bytes of headroom --
+ *   rwnx_start_xmit() wraps the pbuf in an sk_buff in place
+ *   (alloc_skb_with_pbuf) rather than copying -- so the bytes have to land
+ *   in a vendor-shaped buffer anyway.  bk7258_wifi_tx_alloc() allocates it
+ *   with exactly the headroom the vendor's own lwIP port would have given
+ *   it (PBUF_RAW_TX).
+ *
+ *   Serialization: the upper half sends one packet at a time (upper->txing
+ *   plus the net lock), so there is no queue here and no reclaim() needed
+ *   -- the netpkt is freed before this function returns.
  *
  ****************************************************************************/
 
 static int bk7258_wifi_transmit(FAR struct netdev_lowerhalf_s *dev,
                                 FAR netpkt_t *pkt)
 {
-  UNUSED(dev);
-  UNUSED(pkt);
+  unsigned int len = netpkt_getdatalen(dev, pkt);
+  FAR uint8_t *payload;
+  FAR void *frame;
+  int ret;
 
-  return -ENOSYS;
+  frame = bk7258_wifi_tx_alloc(len, &payload);
+  if (frame == NULL)
+    {
+      /* Out of heap.  The upper half recycles the netpkt. */
+
+      return -ENOMEM;
+    }
+
+  ret = netpkt_copyout(dev, payload, pkt, len, 0);
+  if (ret < 0)
+    {
+      bk7258_wifi_tx_abort(frame);
+      return ret;
+    }
+
+  /* tx_send consumes the pbuf whether the vendor queue took it or not.  A
+   * full vendor queue is congestion; the frame is gone either way and the
+   * stack's own timers are the recovery, so the answer is OK.
+   */
+
+  bk7258_wifi_tx_send(frame);
+  netpkt_free(dev, pkt, NETPKT_TX);
+  return OK;
 }
 
 /****************************************************************************
@@ -334,13 +395,78 @@ static int bk7258_wifi_transmit(FAR struct netdev_lowerhalf_s *dev,
  *   Called after netdev_lower_rxready().  Returns one packet or NULL when
  *   the driver has none left; the upper half keeps calling until NULL.
  *
+ *   Must tolerate being called with nothing queued: netdev_upper_work()
+ *   runs the RX poll before the TX poll, so this is also called after
+ *   every transmit completion, not only after rxready.
+ *
  ****************************************************************************/
 
 static FAR netpkt_t *bk7258_wifi_receive(FAR struct netdev_lowerhalf_s *dev)
 {
-  UNUSED(dev);
+  FAR struct bk7258_wifi_dev_s *priv = (FAR struct bk7258_wifi_dev_s *)dev;
+  FAR netpkt_t *pkt = NULL;
+  irqstate_t flags;
 
-  return NULL;
+  flags = enter_critical_section();
+  if (priv->rxtail != priv->rxhead)
+    {
+      pkt = priv->rxq[priv->rxtail & BK7258_WIFI_RXQ_MASK];
+      priv->rxtail++;
+    }
+
+  leave_critical_section(flags);
+  return pkt;
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_rx_frame
+ *
+ * Description:
+ *   Where received frames arrive from the vendor stack -- handed across
+ *   the flag boundary by ethernetif_input() in bk7258_wifi_pbuf.c, running
+ *   on the vendor core thread.  Task context, so netpkt_alloc() is legal
+ *   here.
+ *
+ *   The frame is already an 802.3 ethernet frame: the closed MAC converts
+ *   from 802.11 before upload (rwm_upload_data), and ethernetif_input
+ *   flattens any chain before calling.
+ *
+ *   netpkt_alloc() returning NULL is the flow control: it refuses past the
+ *   RX quota, which means the network worker has 8 packets it has not
+ *   drained yet.  Dropping at the edge is what every driver in the tree
+ *   does when the stack is behind; the counter makes it visible.
+ *
+ ****************************************************************************/
+
+void bk7258_wifi_rx_frame(int iface, FAR const void *data, unsigned int len)
+{
+  FAR struct bk7258_wifi_dev_s *priv = &g_bk7258_wifi;
+  FAR struct netdev_lowerhalf_s *dev = &priv->dev;
+  FAR netpkt_t *pkt;
+  irqstate_t flags;
+
+  UNUSED(iface);
+
+  pkt = netpkt_alloc(dev, NETPKT_RX);
+  if (pkt == NULL)
+    {
+      priv->rxdrops++;
+      return;
+    }
+
+  if (netpkt_copyin(dev, pkt, data, len, 0) < 0)
+    {
+      netpkt_free(dev, pkt, NETPKT_RX);
+      priv->rxdrops++;
+      return;
+    }
+
+  flags = enter_critical_section();
+  priv->rxq[priv->rxhead & BK7258_WIFI_RXQ_MASK] = pkt;
+  priv->rxhead++;
+  leave_critical_section(flags);
+
+  netdev_lower_rxready(dev);
 }
 
 /****************************************************************************

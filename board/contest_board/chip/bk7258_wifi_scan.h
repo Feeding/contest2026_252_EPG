@@ -28,6 +28,15 @@
 
 #include <stdint.h>
 
+/* This header is included from both flag domains.  The vendor side has no
+ * nuttx/compiler.h, so FAR (an empty macro on this architecture anyway)
+ * needs a fallback.
+ */
+
+#ifndef FAR
+#  define FAR
+#endif
+
 struct bk7258_scan_ap_s
 {
   uint8_t bssid[6];
@@ -70,6 +79,37 @@ int bk7258_wifi_get_mac(uint8_t *mac);
 #define BK7258_WIFI_LINK_CONNECT_FAILED 4
 
 int bk7258_wifi_link_state(void);
+
+/* The station VIF index, once rw_msg_send_add_if() has created it; 0xff
+ * before that.  The TX path needs it -- bmsg_tx_sender() silently discards
+ * frames sent on a wrong VIF.
+ */
+
+uint8_t bk7258_wifi_vif(void);
+
+/* TX buffer handoff, implemented in bk7258_wifi_pbuf.c because the buffer
+ * is a vendor pbuf: allocated with the PBUF_RAW_TX headroom
+ * (CONFIG_MSDU_RESV_HEAD_LENGTH = 96 bytes) that rwnx_start_xmit() requires
+ * -- it wraps the pbuf in an sk_buff in place rather than copying.
+ *
+ *   alloc: returns an opaque handle and points *payload at len writable
+ *          bytes.  NULL when the heap is exhausted.
+ *   send:  hands the frame to the MAC via bmsg_tx_sender() and drops our
+ *          reference; consumes the handle whether the vendor queue took
+ *          the frame or not.  Returns 0 if it was queued.
+ *   abort: frees an allocated-but-unsent frame.
+ */
+
+FAR void *bk7258_wifi_tx_alloc(unsigned int len, FAR uint8_t **payload);
+int bk7258_wifi_tx_send(FAR void *frame);
+void bk7258_wifi_tx_abort(FAR void *frame);
+
+/* RX handoff in the other direction, implemented in bk7258_wifi.c and
+ * called by ethernetif_input() in bk7258_wifi_pbuf.c on the vendor core
+ * thread.  'data' is a flattened 802.3 frame.
+ */
+
+void bk7258_wifi_rx_frame(int iface, FAR const void *data, unsigned int len);
 
 /* How many APs the last completed scan found.  Touches no reference count,
  * so it is safe to call without holding the set.

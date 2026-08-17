@@ -125,15 +125,27 @@ int bk7258_wifi_vendor_init(void)
  *
  ****************************************************************************/
 
+/* The station VIF, created on first scan.  File-scope rather than local to
+ * scan_start because the TX path needs it too: bmsg_tx_sender() takes the
+ * VIF index with every frame, and a wrong one makes frames vanish without
+ * an error.
+ */
+
+static uint8_t g_bk7258_vif_idx = 0xff;
+
+uint8_t bk7258_wifi_vif(void)
+{
+  return g_bk7258_vif_idx;
+}
+
 int bk7258_wifi_scan_start(void)
 {
-  static uint8_t vif_idx = 0xff;
   SCAN_PARAM_T param;
   int ret;
 
   sa_station_init();
 
-  if (vif_idx == 0xff)
+  if (g_bk7258_vif_idx == 0xff)
     {
       struct mm_add_if_cfm cfm;
       uint8_t mac[6];
@@ -146,7 +158,7 @@ int bk7258_wifi_scan_start(void)
           return -1;
         }
 
-      vif_idx = cfm.inst_nbr;
+      g_bk7258_vif_idx = cfm.inst_nbr;
     }
 
   /* All-zero means: every supported channel, no SSID filter, no extra IEs.
@@ -165,7 +177,7 @@ int bk7258_wifi_scan_start(void)
 
   os_memset(&param, 0, sizeof(param));
   os_memset(&param.bssid, 0xff, sizeof(param.bssid));
-  param.vif_idx = vif_idx;
+  param.vif_idx = g_bk7258_vif_idx;
 
   return rw_msg_send_scanu_req(&param) == 0 ? 0 : -1;
 }

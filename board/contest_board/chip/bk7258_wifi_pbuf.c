@@ -101,8 +101,9 @@
  * (pointer, length) pair so that neither side needs the other's headers.
  */
 
-extern void bk7258_wifi_rx_frame(int iface, const void *data,
-                                 unsigned int len);
+/* Cross-domain contract: rx_frame, tx_*, vif. */
+
+#include "bk7258_wifi_scan.h"
 
 /****************************************************************************
  * Public Functions
@@ -316,6 +317,71 @@ void ethernetif_input(int iface, struct pbuf *p)
 
   bk7258_wifi_rx_frame(iface, p->payload, p->len);
   pbuf_free(p);
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_tx_alloc / bk7258_wifi_tx_send / bk7258_wifi_tx_abort
+ *
+ * Description:
+ *   The TX half of the same seam.  The netdev driver cannot build the
+ *   vendor's buffer itself -- struct pbuf only has its real layout under
+ *   these flags -- so it asks for one here, fills it through *payload, and
+ *   sends it.
+ *
+ *   PBUF_RAW_TX matters.  bmsg_tx_handler() hands the pbuf to
+ *   rwnx_start_xmit(), which wraps it in an sk_buff IN PLACE
+ *   (alloc_skb_with_pbuf) -- the CONFIG_MSDU_RESV_HEAD_LENGTH (96) bytes
+ *   of headroom in front of the payload are where the descriptor and
+ *   802.11 header go.  A PBUF_RAW allocation would have the vendor writing
+ *   in front of the buffer.  PBUF_RAW_TX is what the vendor's own lwIP
+ *   output path (wlanif.c low_level_output) hands it, so this is the same
+ *   shape by construction.
+ *
+ *   Reference discipline copied from that same caller: bmsg_tx_sender()
+ *   takes its own pbuf_ref() and the queue drains it; the caller drops its
+ *   own reference when the call returns, success or not (rw_task.c:493-498).
+ *
+ ****************************************************************************/
+
+extern int bmsg_tx_sender(struct pbuf *p, uint32_t vif_idx);
+
+void *bk7258_wifi_tx_alloc(unsigned int len, uint8_t **payload)
+{
+  struct pbuf *p;
+
+  if (payload == NULL || len == 0 || len > 0xffff)
+    {
+      return NULL;
+    }
+
+  p = pbuf_alloc(PBUF_RAW_TX, (u16_t)len, PBUF_RAM);
+  if (p == NULL)
+    {
+      return NULL;
+    }
+
+  *payload = (uint8_t *)p->payload;
+  return p;
+}
+
+int bk7258_wifi_tx_send(void *frame)
+{
+  struct pbuf *p = (struct pbuf *)frame;
+  uint8_t vif = bk7258_wifi_vif();
+  int ret = -1;
+
+  if (vif != 0xff)
+    {
+      ret = bmsg_tx_sender(p, vif);
+    }
+
+  pbuf_free(p);
+  return ret == 0 ? 0 : -1;
+}
+
+void bk7258_wifi_tx_abort(void *frame)
+{
+  pbuf_free((struct pbuf *)frame);
 }
 
 /****************************************************************************
