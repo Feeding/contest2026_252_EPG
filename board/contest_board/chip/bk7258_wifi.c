@@ -64,6 +64,7 @@
 #include <nuttx/wireless/wireless.h>
 
 #include <nuttx/signal.h>
+#include <nuttx/wqueue.h>
 
 #include "bk7258_wifi.h"
 #include "bk7258_wifi_scan.h"
@@ -130,6 +131,7 @@ struct bk7258_wifi_dev_s
    * an array bound.
    */
 
+  struct work_s lostwork;           /* Deferred carrier-off, see link_lost */
   FAR netpkt_t *rxq[BK7258_WIFI_RX_QUOTA * 2];
   uint8_t  rxhead;                  /* Next slot to fill */
   uint8_t  rxtail;                  /* Next slot to drain */
@@ -400,6 +402,7 @@ static int bk7258_wifi_transmit(FAR struct netdev_lowerhalf_s *dev,
       return -ENOMEM;
     }
 
+
   ret = netpkt_copyout(dev, payload, pkt, len, 0);
   if (ret < 0)
     {
@@ -509,6 +512,14 @@ void bk7258_wifi_rx_frame(int iface, FAR const void *data, unsigned int len)
  *
  ****************************************************************************/
 
+static void bk7258_wifi_link_lost_worker(FAR void *arg)
+{
+  FAR struct bk7258_wifi_dev_s *priv = arg;
+
+  netdev_lower_carrier_off(&priv->dev);
+  syslog(LOG_WARNING, "wifi: link lost, carrier down\n");
+}
+
 void bk7258_wifi_link_lost(void)
 {
   FAR struct bk7258_wifi_dev_s *priv = &g_bk7258_wifi;
@@ -516,8 +527,21 @@ void bk7258_wifi_link_lost(void)
   if (priv->connected)
     {
       priv->connected = false;
-      netdev_lower_carrier_off(&priv->dev);
-      syslog(LOG_WARNING, "wifi: link lost, carrier down\n");
+
+      /* Deferred, never inline: this runs on the wpas thread, and
+       * netdev_lower_carrier_off() takes the netdev lock.  During ifdown
+       * that lock is held by the caller's ioctl, which is itself blocked
+       * inside wlan_sta_disconnect() waiting for THIS thread to post the
+       * ctrl semaphore -- calling carrier_off here closes the cycle and
+       * both threads wait forever.  Measured, not theorized: the first
+       * ifdown against a live association hung the shell exactly this way,
+       * after a perfectly clean deauth.  (The driver's own disconnect()
+       * calls carrier_off inline and safely: same thread as the ioctl, and
+       * the netdev lock is recursive.)
+       */
+
+      work_queue(LPWORK, &priv->lostwork, bk7258_wifi_link_lost_worker,
+                 priv, 0);
     }
 }
 

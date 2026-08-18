@@ -148,6 +148,30 @@ static uint8_t g_bk7258_vif_idx = 0xff;
 
 uint8_t bk7258_wifi_vif(void)
 {
+#ifdef BK7258_WIFI_WPA
+  /* On the supplicant build the STA VIF is created by the supplicant deep
+   * inside wlan_sta_connect(), which runs on the wpas thread AFTER
+   * sta_ensure() has already tried (and failed) to recover the index.  The
+   * TX path calls this for every data frame, so resolve it lazily here:
+   * once the supplicant has added the VIF, rwm_mgmt_vif_mac2idx() finds it
+   * by the station MAC.  Before that -- e.g. an EAPOL frame mid-handshake
+   * -- 0xff is the honest answer and bmsg_tx_sender() drops the frame,
+   * which is correct, there is no VIF to send it on yet.
+   *
+   * Symptom this fixes: DHCP DISCOVER left transmit() with vif 255 and the
+   * MAC silently discarded it, so an associated WPA station never got an
+   * address.
+   */
+
+  if (g_bk7258_vif_idx == 0xff)
+    {
+      uint8_t mac[6];
+
+      bk_wifi_sta_get_mac(mac);
+      g_bk7258_vif_idx = rwm_mgmt_vif_mac2idx(mac);
+    }
+#endif
+
   return g_bk7258_vif_idx;
 }
 
