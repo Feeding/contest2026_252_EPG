@@ -327,6 +327,22 @@ int rtos_create_thread(void **thread, uint8_t priority, const char *name,
   a->function = function;
   a->arg      = arg;
 
+  /* The supplicant asks for 5120 bytes (WPAS_STACK_SZ), sized to wolfssl's
+   * SQRTMOD_USE_MOD_EXP shortcut; the comment right above that number says
+   * "if SQRTMOD_USE_MOD_EXP is not enabled, enlarge stack size to 15K".
+   * This build's crypto is mbedtls, no shortcut, and the first SAE commit
+   * proved the comment right: a P-256 point multiply blew the 5 KB stack
+   * and ARMv8-M's stack-limit check faulted with STKOF (CFSR bit 20) --
+   * a fault the vendor's FreeRTOS build cannot see and silently survives
+   * as heap corruption.  16 KB covers the 15 K the vendor names, rounded
+   * to what every other thread in this image already uses.
+   */
+
+  if (strcmp(name, "wpas_thread") == 0 && stack_size < 16384)
+    {
+      stack_size = 16384;
+    }
+
   snprintf(buf, sizeof(buf), "%p", a);
   argv[0] = buf;
   argv[1] = NULL;
