@@ -55,6 +55,7 @@
  ****************************************************************************/
 
 #include <common/bk_include.h>
+#include <os/mem.h>
 #include <modules/wifi.h>
 #include <modules/wifi_types.h>
 
@@ -68,6 +69,14 @@
 /* SCAN_PARAM_T, rw_msg_send_add_if, rw_msg_send_scanu_req, sr_get_scan_*. */
 
 #include "bk_private/bk_rw.h"
+
+/* bk_wlan_start_sta, wlan_sta_enable, network_InitTypeDef_st. */
+
+#include "bk_private/bk_wifi.h"
+
+#ifdef BK7258_WIFI_WPA
+#  include <components/event.h>
+#endif
 
 /* WPA_CTRL_EVENT_*, for the event bridge below. */
 
@@ -142,6 +151,167 @@ uint8_t bk7258_wifi_vif(void)
   return g_bk7258_vif_idx;
 }
 
+#ifdef BK7258_WIFI_WPA
+
+/****************************************************************************
+ * Name: bk7258_wifi_sta_ensure
+ *
+ * Description:
+ *   Bring the supplicant's STA interface up, once.  wlan_sta_enable() makes
+ *   the supplicant create its own STA VIF (wpa_driver_init ->
+ *   PRISM2_HOSTAPD_WPA_INIT_VIF -> rw_msg_send_add_if), so this port must
+ *   NOT pre-add one the way the supplicant-less build does -- two adds of
+ *   the same MAC/type is a state the vendor flow never exercises.  The VIF
+ *   index is recovered afterwards from the MAC, for the TX and scan paths.
+ *
+ *   The wpas thread itself was started by bk_wifi_init(): the vendor's
+ *   wifi_init() ends by calling wpas_thread_start() once the real
+ *   main_supplicant.c is in the image.
+ *
+ ****************************************************************************/
+
+static int bk7258_wifi_sta_ensure(void)
+{
+  static bool enabled = false;
+  uint8_t mac[6];
+
+  if (!enabled)
+    {
+      /* Vendor order (bk_wlan_start_sta -> bk_wlan_sta_init): the MAC gets
+       * reset/me_config/chan_config BEFORE the supplicant comes up.  The
+       * first WPA build skipped this and every channel lookup in the scan
+       * came back null (freq 0xaaaa) -- the channel table was never
+       * configured.  sa_station_init() guards itself on an existing VIF,
+       * so it runs the full init exactly once.
+       */
+
+      sa_station_init();
+
+      if (wlan_sta_enable() != 0)
+        {
+          return -1;
+        }
+
+      enabled = true;
+    }
+
+  if (g_bk7258_vif_idx == 0xff)
+    {
+      bk_wifi_sta_get_mac(mac);
+      g_bk7258_vif_idx = rwm_mgmt_vif_mac2idx(mac);
+    }
+
+  return g_bk7258_vif_idx == 0xff ? -1 : 0;
+}
+
+/* The supplicant's scan results, fetched once per scan and held until the
+ * next one.  wlan_sta_scan_result() drains AND flushes the supplicant's BSS
+ * table (wifi_v2.c:1121), so fetching per ioctl would hand the first caller
+ * everything and every later caller nothing -- the same shape as the
+ * sr_get/sr_release lesson, one layer up.  The fetch happens only once the
+ * supplicant has marked the scan complete (SCAN_DONE), because a mid-scan
+ * fetch would flush the half-filled table and lose the early APs.
+ */
+
+static ScanResult_adv g_bk7258_aplist;
+
+/* Set by bk_event_post() when the supplicant announces EVENT_WIFI_SCAN_DONE,
+ * cleared when a new scan starts.  The linkstate cannot serve here: nothing
+ * on the supplicant's normal path ever writes WIFI_LINKSTATE_STA_SCAN_DONE
+ * (only the AT-command layer does, wifi_at.c:802), so a gate on it never
+ * opens.  The event, by contrast, must pass through our bk_event_post.
+ */
+
+static volatile bool g_bk7258_scan_done;
+
+
+int bk7258_wifi_scan_start(void)
+{
+  if (bk7258_wifi_sta_ensure() != 0)
+    {
+      return -1;
+    }
+
+  if (g_bk7258_aplist.ApList != NULL)
+    {
+      os_free(g_bk7258_aplist.ApList);
+      g_bk7258_aplist.ApList = NULL;
+      g_bk7258_aplist.ApNum = 0;
+    }
+
+  g_bk7258_scan_done = false;
+
+  return wlan_sta_scan_once() == 0 ? 0 : -1;
+}
+
+static void bk7258_wifi_scan_fetch(void)
+{
+  if (g_bk7258_aplist.ApList != NULL)
+    {
+      return;
+    }
+
+  if (!g_bk7258_scan_done)
+    {
+      return;
+    }
+
+  g_bk7258_aplist.ApList = NULL;
+  g_bk7258_aplist.ApNum = 0;
+
+  if (wlan_sta_scan_result(&g_bk7258_aplist) != 0)
+    {
+      g_bk7258_aplist.ApList = NULL;
+      g_bk7258_aplist.ApNum = 0;
+    }
+}
+
+int bk7258_wifi_scan_count(void)
+{
+  bk7258_wifi_scan_fetch();
+  return g_bk7258_aplist.ApList != NULL ? g_bk7258_aplist.ApNum : 0;
+}
+
+int bk7258_wifi_scan_acquire(void)
+{
+  bk7258_wifi_scan_fetch();
+  return g_bk7258_aplist.ApList != NULL ? g_bk7258_aplist.ApNum : 0;
+}
+
+void bk7258_wifi_scan_release(void)
+{
+  /* The cache lives until the next scan replaces it. */
+}
+
+int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap)
+{
+  const struct ApListStruct *item;
+
+  if (ap == NULL || index < 0 || g_bk7258_aplist.ApList == NULL ||
+      index >= g_bk7258_aplist.ApNum)
+    {
+      return -1;
+    }
+
+  item = &g_bk7258_aplist.ApList[index];
+
+  os_memcpy(ap->bssid, item->bssid, sizeof(ap->bssid));
+  os_memcpy(ap->ssid, item->ssid, 32);
+  ap->ssid[32] = '\0';
+  ap->channel  = (uint8_t)item->channel;
+
+  /* ApPower is the vendor's 0..100 quality scale, not dBm; map it back to
+   * a dBm-ish monotonic value for the wireless API.
+   */
+
+  ap->rssi     = (int32_t)item->ApPower / 2 - 100;
+  ap->caps     = 0;
+  ap->security = (int)item->security;
+  return 0;
+}
+
+#else /* !BK7258_WIFI_WPA */
+
 int bk7258_wifi_scan_start(void)
 {
   SCAN_PARAM_T param;
@@ -185,6 +355,8 @@ int bk7258_wifi_scan_start(void)
 
   return rw_msg_send_scanu_req(&param) == 0 ? 0 : -1;
 }
+
+#endif /* BK7258_WIFI_WPA */
 
 /****************************************************************************
  * Name: bk7258_wifi_connect_open
@@ -256,6 +428,102 @@ int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status)
   return ret;
 }
 
+#ifdef BK7258_WIFI_WPA
+
+/****************************************************************************
+ * Name: bk7258_wifi_connect_sta
+ *
+ * Description:
+ *   Join an AP through the supplicant -- WPA2/WPA3 or open, decided by the
+ *   AP's IEs and whether a key is given.
+ *
+ *   This is deliberately just bk_wlan_start_sta(): the open-source template
+ *   in wifi_v2.c:633 that does the whole vendor-blessed sequence --
+ *   disconnect, set CONNECTING, fill g_sta_param_ptr, wpa_psk_request (the
+ *   PBKDF2 precompute on the PSK-cache thread), wlan_sta_enable,
+ *   wlan_sta_set (SSID -> PSK -> KEY_MGMT -> PROTO -> ciphers), and
+ *   wlan_sta_connect.  Replicating those steps here would only create a
+ *   second copy to keep honest.
+ *
+ * Returned Value:
+ *   0 once the join has been handed to the supplicant.  Completion is
+ *   asynchronous; the driver polls the link state, which the supplicant
+ *   advances to CONNECTED only at WPA_COMPLETED -- after the 4-way
+ *   handshake, which is the right moment for the carrier.
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_connect_sta(const char *ssid, int ssid_len, const char *key)
+{
+  network_InitTypeDef_st param;
+
+  if (ssid == NULL || ssid_len <= 0 || ssid_len > 32)
+    {
+      return -1;
+    }
+
+  os_memset(&param, 0, sizeof(param));
+  param.wifi_mode = BK_STATION;
+  os_memcpy(param.wifi_ssid, ssid, ssid_len);
+
+  if (key != NULL)
+    {
+      os_strlcpy(param.wifi_key, key, sizeof(param.wifi_key));
+    }
+
+  return bk_wlan_start_sta(&param) == kNoErr ? 0 : -1;
+}
+
+/****************************************************************************
+ * Name: bk_event_post / bk_event_register_cb
+ *
+ * Description:
+ *   The vendor event bus (components/bk_event), reduced to the one duty
+ *   this port needs from it.  The supplicant's notify.c posts
+ *   EVENT_WIFI_STA_CONNECTED / _DISCONNECTED here; wifi_netif.c registers
+ *   callbacks it never gets.  Everything that matters for the driver --
+ *   the link state -- travels through mhdr_set_station_status(), which the
+ *   supplicant also advances; the one thing that does not is the carrier
+ *   drop on a disconnect that the driver is not watching for, and that is
+ *   what this forwards.
+ *
+ ****************************************************************************/
+
+bk_err_t bk_event_post(event_module_t module, int event_id,
+                       void *event_data, size_t event_data_size,
+                       uint32_t timeout)
+{
+  (void)event_data;
+  (void)event_data_size;
+  (void)timeout;
+
+  if (module == EVENT_MOD_WIFI)
+    {
+      if (event_id == EVENT_WIFI_STA_DISCONNECTED)
+        {
+          bk7258_wifi_link_lost();
+        }
+      else if (event_id == EVENT_WIFI_SCAN_DONE)
+        {
+          g_bk7258_scan_done = true;
+        }
+    }
+
+  return BK_OK;
+}
+
+bk_err_t bk_event_register_cb(event_module_t module, int event_id,
+                              event_cb_t event_cb, void *event_cb_arg)
+{
+  (void)module;
+  (void)event_id;
+  (void)event_cb;
+  (void)event_cb_arg;
+  return BK_OK;
+}
+
+#endif /* BK7258_WIFI_WPA */
+
 /****************************************************************************
  * Name: bk7258_wifi_get_mac
  *
@@ -325,6 +593,8 @@ int bk7258_wifi_link_state(void)
   return (int)info.state;
 }
 
+#ifndef BK7258_WIFI_WPA
+
 /****************************************************************************
  * Name: bk7258_wifi_wpa_event
  *
@@ -393,6 +663,10 @@ int bk7258_wifi_wpa_event(int event, const void *data, int len)
         return -1;
     }
 }
+
+#endif /* !BK7258_WIFI_WPA */
+
+#ifndef BK7258_WIFI_WPA
 
 int bk7258_wifi_scan_count(void)
 {
@@ -490,6 +764,17 @@ int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap)
   ap->security = item->security;
   return 0;
 }
+
+#endif /* !BK7258_WIFI_WPA */
+
+/* With the supplicant compiled in, get_security_type_from_ie comes from
+ * wpa_supplicant/events.c (the original this block reimplemented) and
+ * get_ie/get_vendor_ie from src/common/ieee802_11_common.c -- the vendor
+ * versions are a strict superset (they add OWE detection).  Ours exist only
+ * for the supplicant-less build.
+ */
+
+#ifndef BK7258_WIFI_WPA
 
 /****************************************************************************
  * Name: bk7258_wifi_akm_cipher
@@ -709,3 +994,5 @@ int get_security_type_from_ie(uint8_t *ie_start, int len, uint16_t caps)
 
   return BK_SECURITY_TYPE_NONE;
 }
+
+#endif /* !BK7258_WIFI_WPA */

@@ -61,6 +61,14 @@ int bk7258_wifi_scan_start(void);
 
 int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status);
 
+/* Join through the supplicant (CONFIG_BK7258_WIFI_WPA builds): WPA2/WPA3 or
+ * open by the AP's IEs; NULL key for open.  Returns 0 once handed to the
+ * supplicant; completion is asynchronous via the link state, which reaches
+ * CONNECTED only after the 4-way handshake.
+ */
+
+int bk7258_wifi_connect_sta(const char *ssid, int ssid_len, const char *key);
+
 /* The station MAC as the vendor stack uses it on air.  Valid only after
  * bk7258_wifi_vendor_init().  Returns 0 on success.
  */

@@ -303,6 +303,14 @@ struct pbuf *pbuf_coalesce(struct pbuf *p, pbuf_layer layer)
  *
  ****************************************************************************/
 
+#ifdef BK7258_WIFI_WPA
+/* bk_patch/sk_intf.c.  Queues the frame for the supplicant's l2_packet
+ * reader and wakes the wpas thread itself.
+ */
+
+extern int ke_l2_packet_tx(unsigned char *buf, int len, int flag);
+#endif
+
 void ethernetif_input(int iface, struct pbuf *p)
 {
   if (p == NULL)
@@ -314,6 +322,24 @@ void ethernetif_input(int iface, struct pbuf *p)
     {
       p = pbuf_coalesce(p, PBUF_RAW);
     }
+
+#ifdef BK7258_WIFI_WPA
+  /* EAPOL belongs to the supplicant, not the IP stack.  This is the same
+   * ethertype fork the vendor's own lwIP port makes at exactly this spot
+   * (wlanif.c:273): the 4-way handshake frames go to the fake l2 socket
+   * (full frame, ethernet header included; 'iface' is the vif index), and
+   * without this fork every PSK join would associate and then time out
+   * waiting for message 1/4 that went to NuttX instead.
+   */
+
+  if (p->len >= 14 &&
+      ((u8_t *)p->payload)[12] == 0x88 && ((u8_t *)p->payload)[13] == 0x8e)
+    {
+      ke_l2_packet_tx(p->payload, p->len, iface);
+      pbuf_free(p);
+      return;
+    }
+#endif
 
   bk7258_wifi_rx_frame(iface, p->payload, p->len);
   pbuf_free(p);

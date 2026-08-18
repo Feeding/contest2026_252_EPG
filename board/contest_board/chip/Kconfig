@@ -135,6 +135,32 @@ config BK7258_WIFI_ATE
 		called before bk7258_wifi_ifup(), which is where bk_wifi_init()
 		runs.
 
+config BK7258_WIFI_WPA
+	bool "WPA2/WPA3 via the vendor wpa_supplicant"
+	default n
+	depends on BK7258_WIFI_VENDOR
+	---help---
+		Compile Beken's wpa_supplicant 2.10 (open source, in the SDK) and
+		the mbedtls crypto subset it needs into the vendor object code,
+		enabling WPA2-PSK and WPA3-SAE association.  Without it the port
+		associates open-system only.
+
+		This is the vendor's own STA configuration: the same 78 supplicant
+		files its sta_connect build compiles (crypto backed by mbedtls, as
+		CONFIG_USE_MBEDTLS in the vendor sdkconfig dictates -- the
+		internal-crypto alternative preprocesses to empty objects under
+		that header and cannot be chosen from outside it).
+
+		Turning this on retires the shim's wpa_ctrl_*/sk_intf stubs and the
+		glue's own get_ie/get_security_type_from_ie -- the real supplicant
+		defines all of them -- and the received-EAPOL fork in
+		ethernetif_input becomes live so the 4-way handshake can happen.
+
+		One deliberate substitution: the supplicant's os_get_random() and
+		mbedtls's entropy source are rand()-backed in the vendor tree; here
+		both are rebound to arc4random_buf(), the CSPRNG this image already
+		carries.  SAE and the WPA2 nonces are only as good as this source.
+
 config BK7258_FLASH
 	bool "On-chip flash MTD"
 	default n

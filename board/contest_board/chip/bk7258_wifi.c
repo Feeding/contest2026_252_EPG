@@ -75,7 +75,15 @@
  * comes back rather than appearing hung.
  */
 
-#define BK7258_WIFI_CONNECT_TIMEOUT_MS  3000
+#ifdef CONFIG_BK7258_WIFI_WPA
+/* The supplicant path adds a PBKDF2 precompute (4096 iterations, on a
+ * priority-100 thread), its own scan, and the 4-way handshake.
+ */
+
+#  define BK7258_WIFI_CONNECT_TIMEOUT_MS  20000
+#else
+#  define BK7258_WIFI_CONNECT_TIMEOUT_MS  3000
+#endif
 #define BK7258_WIFI_CONNECT_POLL_MS     50
 
 /****************************************************************************
@@ -513,8 +521,21 @@ static int bk7258_wifi_connect(FAR struct netdev_lowerhalf_s *dev)
       return -EINVAL;
     }
 
+#ifdef CONFIG_BK7258_WIFI_WPA
+  /* Through the supplicant: WPA2/WPA3 by the AP's IEs, open if no key was
+   * set.  The supplicant sets CONNECTING itself and advances to CONNECTED
+   * only at WPA_COMPLETED -- after the 4-way handshake -- so the poll below
+   * raises the carrier at the right moment for both cases.
+   */
+
+  ret = bk7258_wifi_connect_sta((FAR const char *)priv->ssid,
+                                priv->ssid_len,
+                                priv->passwd[0] != '\0' ? priv->passwd
+                                                         : NULL);
+#else
   ret = bk7258_wifi_connect_open((FAR const char *)priv->ssid,
                                  priv->ssid_len, &status);
+#endif
 
   syslog(LOG_INFO, "wifi: connect '%.*s' -> %d (status %d)\n",
          priv->ssid_len, priv->ssid, ret, status);
@@ -665,13 +686,30 @@ static int bk7258_wifi_passwd(FAR struct netdev_lowerhalf_s *dev,
       return -ENOTSUP;
     }
 
-  if (data->length > sizeof(priv->passwd) - 1)
+  /* The buffer is not the passphrase.  SIOCSIWENCODEEXT carries a struct
+   * iw_encode_ext with the key appended after it (wapi builds it at
+   * driver_wext.c:167-183: pointer -> ext, length = sizeof + key_len, key
+   * at ext + 1).  The first version here copied the raw buffer -- header
+   * and all -- and stored 32 bytes of struct as the credential, then
+   * rejected any real passphrase over 24 characters because the header ate
+   * the rest of the length budget.
+   */
+
     {
-      return -EINVAL;
+      FAR struct iw_encode_ext *ext = (FAR struct iw_encode_ext *)
+                                      data->pointer;
+
+      if (ext == NULL || data->length < sizeof(*ext) ||
+          ext->key_len != data->length - sizeof(*ext) ||
+          ext->key_len > sizeof(priv->passwd) - 1)
+        {
+          return -EINVAL;
+        }
+
+      memcpy(priv->passwd, ext->key, ext->key_len);
+      priv->passwd[ext->key_len] = '\0';
     }
 
-  memcpy(priv->passwd, data->pointer, data->length);
-  priv->passwd[data->length] = '\0';
   return OK;
 }
 

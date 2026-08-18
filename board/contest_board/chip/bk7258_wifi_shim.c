@@ -53,6 +53,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
 #include <time.h>
@@ -61,6 +62,7 @@
 #include <nuttx/clock.h>
 #include <nuttx/irq.h>
 #include <nuttx/mm/mm.h>
+#include <nuttx/kmalloc.h>
 
 #include <arch/board/board.h>
 
@@ -750,6 +752,15 @@ int bk_pm_sleep_register_cb(int sleep_mode, int dev_id,
  * called.
  */
 
+/* With the supplicant compiled in (CONFIG_BK7258_WIFI_WPA) every one of
+ * these has a real, strong definition -- ctrl_iface.c, main_supplicant.c,
+ * main_none.c, bk_patch/sk_intf.c, ieee802_11_common.c, notify.c -- and a
+ * stub would be a duplicate-definition link error.  The stubs exist only
+ * for the supplicant-less build.
+ */
+
+#ifndef CONFIG_BK7258_WIFI_WPA
+
 int wpa_ctrl_request(int cmd, void *data)
 {
   UNUSED(cmd);
@@ -891,6 +902,204 @@ bool sta_check_user_is_11b_1mbps_supported(void)
 {
   return false;
 }
+
+#endif /* !CONFIG_BK7258_WIFI_WPA */
+
+#ifdef CONFIG_BK7258_WIFI_WPA
+
+/****************************************************************************
+ * Supplicant platform gaps
+ *
+ * Symbols the supplicant sources consume that neither they, the closed
+ * archives, nor NuttX define.  Each has a verified caller; none is
+ * speculative.
+ ****************************************************************************/
+
+/* wpa_psk_cache.c precomputes PSKs on its own thread and nudges that
+ * thread's priority around the computation.  Our OSI runs every vendor
+ * thread at a fixed NuttX priority, so this is accepted and ignored --
+ * the only cost is that the precompute does not yield more aggressively.
+ */
+
+int rtos_thread_set_priority(void *thread, int priority)
+{
+  UNUSED(thread);
+  UNUSED(priority);
+  return 0;
+}
+
+/* os_none.c derives wall-clock-ish time from these. */
+
+uint32_t bk_get_second(void)
+{
+  return (uint32_t)(clock_systime_ticks() / TICK_PER_SEC);
+}
+
+uint32_t rtos_get_ms_per_tick(void)
+{
+  return MSEC_PER_TICK;
+}
+
+/* Constant-time compare.  The vendor gets this from a FreeRTOS support
+ * file we do not compile; semantics per the reference implementation
+ * there: 0 iff equal, nonzero otherwise, no early exit.
+ */
+
+int os_memcmp_const(const void *a, const void *b, size_t len)
+{
+  const unsigned char *pa = a;
+  const unsigned char *pb = b;
+  unsigned char diff = 0;
+  size_t i;
+
+  for (i = 0; i < len; i++)
+    {
+      diff |= pa[i] ^ pb[i];
+    }
+
+  return diff;
+}
+
+/* Fast-connect credential storage (easy_flash).  Not ported: a miss makes
+ * the stack fall back to a normal scan-and-join, which is correct if a
+ * few hundred milliseconds slower.  Returning failure/zeroes is the miss.
+ */
+
+int bk_get_env_enhance(const char *key, void *value, int value_len)
+{
+  UNUSED(key);
+
+  if (value != NULL && value_len > 0)
+    {
+      memset(value, 0, value_len);
+    }
+
+  return 0;
+}
+
+int bk_set_env_enhance(const char *key, const void *value, int value_len)
+{
+  UNUSED(key);
+  UNUSED(value);
+  UNUSED(value_len);
+  return 0;
+}
+
+/****************************************************************************
+ * Randomness
+ *
+ * The vendor tree backs both of these with libc rand(): os_none.c's
+ * os_get_random and the mbedtls-port's mbedtls_hardware_poll.  Every WPA2
+ * nonce and SAE scalar flows through one of them.  Here both are backed by
+ * arc4random_buf(), the CSPRNG already in this image; the rand()-backed
+ * originals are renamed away at compile time (see bk7258_wifi_vendor.cmake)
+ * and tls_hardware.c is not compiled at all.
+ ****************************************************************************/
+
+int os_get_random(unsigned char *buf, size_t len)
+{
+  arc4random_buf(buf, len);
+  return 0;
+}
+
+unsigned long os_random(void)
+{
+  unsigned long v;
+
+  arc4random_buf(&v, sizeof(v));
+  return v;
+}
+
+/****************************************************************************
+ * Name: _ctype_
+ *
+ * Description:
+ *   Newlib's character-classification table.  The supplicant sources are
+ *   compiled against the arm-none-eabi toolchain's own <ctype.h>, whose
+ *   isspace()/isdigit() macros index this table (offset by one, EOF at
+ *   slot 0); NuttX's libc classifies differently and never defines it.
+ *   Bits are newlib's: 01 upper, 02 lower, 04 digit, 010 space, 020 punct,
+ *   040 control, 0100 hex, 0200 blank.
+ *
+ ****************************************************************************/
+
+const char _ctype_[257] =
+{
+  0, 040, 040, 040, 040, 040, 040, 040, 040, 040, 050, 050,
+  050, 050, 050, 040, 040, 040, 040, 040, 040, 040, 040, 040,
+  040, 040, 040, 040, 040, 040, 040, 040, 040, 0210, 020, 020,
+  020, 020, 020, 020, 020, 020, 020, 020, 020, 020, 020, 020,
+  020, 0104, 0104, 0104, 0104, 0104, 0104, 0104, 0104, 0104, 0104, 020,
+  020, 020, 020, 020, 020, 020, 0101, 0101, 0101, 0101, 0101, 0101,
+  01, 01, 01, 01, 01, 01, 01, 01, 01, 01, 01, 01,
+  01, 01, 01, 01, 01, 01, 01, 01, 020, 020, 020, 020,
+  020, 020, 0102, 0102, 0102, 0102, 0102, 0102, 02, 02, 02, 02,
+  02, 02, 02, 02, 02, 02, 02, 02, 02, 02, 02, 02,
+  02, 02, 02, 02, 020, 020, 020, 020, 040, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0
+};
+
+/* Heap diagnostics the vendor logging paths call.  Honest numbers where
+ * NuttX has them, and the dumps go to syslog like everything else.
+ */
+
+uint32_t rtos_get_total_heap_size(void)
+{
+  struct mallinfo info = kmm_mallinfo();
+
+  return (uint32_t)info.arena;
+}
+
+uint32_t rtos_get_minimum_free_heap_size(void)
+{
+  /* NuttX does not track the low-water mark; the current free total is the
+   * closest honest answer and errs on the optimistic side.
+   */
+
+  struct mallinfo info = kmm_mallinfo();
+
+  return (uint32_t)info.fordblks;
+}
+
+void os_dump_memory_stats(uint32_t start_tick, uint32_t ticks_since_malloc,
+                          const char *task)
+{
+  UNUSED(start_tick);
+  UNUSED(ticks_since_malloc);
+  UNUSED(task);
+}
+
+void os_show_memory_config_info(void)
+{
+}
+
+/* mbedtls entropy source (MBEDTLS_ENTROPY_HARDWARE_ALT in tls_config.h). */
+
+int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
+                          size_t *olen)
+{
+  UNUSED(data);
+
+  arc4random_buf(output, len);
+  if (olen != NULL)
+    {
+      *olen = len;
+    }
+
+  return 0;
+}
+
+#endif /* CONFIG_BK7258_WIFI_WPA */
 
 /****************************************************************************
  * Public Functions -- PENDING: IP-stack glue

@@ -238,6 +238,208 @@ target_compile_options(bk_wifi_vendor PRIVATE
                        ${BK_WIFI_MACHINE})
 set(BK_WIFI_OBJECTS $<TARGET_OBJECTS:bk_wifi_vendor>)
 
+# ---------------------------------------------------------------------------
+# The wpa_supplicant, for WPA2/WPA3 (CONFIG_BK7258_WIFI_WPA).
+#
+# This is the vendor's own STA configuration verbatim: the same 78 files its
+# sta_connect/bk7258 build compiles (its compile database and the component
+# CMakeLists agree file for file), plus the mbedtls subset that
+# crypto_mbedtls.c needs.  Internal crypto is not an option from outside the
+# vendor's config header: sdkconfig.h defines CONFIG_USE_MBEDTLS 1 and the
+# internal files are guarded "#if !CONFIG_USE_MBEDTLS", so they preprocess
+# to empty objects.
+#
+# A SECOND object library, not more sources in bk_wifi_vendor, because the
+# include order must differ: several supplicant files include "list.h" and
+# must get src/utils/list.h, but bk_wifi_vendor's order puts FreeRTOS's
+# include directory (and its list.h) first.  Here the nine supplicant
+# directories come first; the vendor's own supplicant compile commands have
+# the same shape.
+#
+# Two deliberate deviations from the vendor build, both flagged in Kconfig:
+#
+#   - aes_encrypt/aes_decrypt are renamed with -D: NuttX's crypto/libcrypto.a
+#     defines both names and is immutably linked into this image (the xts
+#     crypto tests keep it), so the supplicant's pair would be a duplicate
+#     definition.  Definition and both consumers (aes-wrap.c, aes-unwrap.c)
+#     live entirely inside this library, so the rename is invisible outside.
+#
+#   - The vendor's randomness bottoms out in libc rand(): os_none.c's
+#     os_get_random and the mbedtls-port's mbedtls_hardware_poll are both
+#     rand()-backed.  Every nonce and SAE scalar flows through them.  The
+#     rand()-backed pair is renamed away at compile time and strong
+#     implementations backed by arc4random_buf() live in
+#     bk7258_wifi_shim.c; tls_hardware.c is simply not compiled.
+# ---------------------------------------------------------------------------
+
+if(CONFIG_BK7258_WIFI_WPA)
+
+# Our cross-domain files (glue, pbuf) compile inside bk_wifi_vendor with the
+# vendor flags and cannot see NuttX's CONFIG_ macros -- hand them the switch
+# explicitly.
+
+target_compile_definitions(bk_wifi_vendor PRIVATE BK7258_WIFI_WPA=1)
+
+set(BK_WPA_ROOT ${BK_IDK_ROOT}/components/wpa_supplicant-2.10)
+set(BK_MBEDTLS  ${BK_IDK_ROOT}/components/mbedtls)
+
+set(BK_WPA_SOURCES
+    ${BK_WPA_ROOT}/bk_patch/ddrv.c
+    ${BK_WPA_ROOT}/bk_patch/fake_socket.c
+    ${BK_WPA_ROOT}/bk_patch/signal.c
+    ${BK_WPA_ROOT}/bk_patch/sk_intf.c
+    ${BK_WPA_ROOT}/hostapd/main_none.c
+    ${BK_WPA_ROOT}/src/ap/ap_config.c
+    ${BK_WPA_ROOT}/src/ap/ap_drv_ops.c
+    ${BK_WPA_ROOT}/src/ap/ap_list.c
+    ${BK_WPA_ROOT}/src/ap/ap_mlme.c
+    ${BK_WPA_ROOT}/src/ap/beacon.c
+    ${BK_WPA_ROOT}/src/ap/dfs.c
+    ${BK_WPA_ROOT}/src/ap/drv_callbacks.c
+    ${BK_WPA_ROOT}/src/ap/hostapd.c
+    ${BK_WPA_ROOT}/src/ap/hw_features.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_11.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_11_auth.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_11_he.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_11_ht.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_11_shared.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_11_vht.c
+    ${BK_WPA_ROOT}/src/ap/ieee802_1x.c
+    ${BK_WPA_ROOT}/src/ap/pmksa_cache_auth.c
+    ${BK_WPA_ROOT}/src/ap/sta_info.c
+    ${BK_WPA_ROOT}/src/ap/tkip_countermeasures.c
+    ${BK_WPA_ROOT}/src/ap/utils.c
+    ${BK_WPA_ROOT}/src/ap/wmm.c
+    ${BK_WPA_ROOT}/src/ap/wpa_auth.c
+    ${BK_WPA_ROOT}/src/ap/wpa_auth_glue.c
+    ${BK_WPA_ROOT}/src/ap/wpa_auth_ie.c
+    ${BK_WPA_ROOT}/src/common/ocv.c
+    ${BK_WPA_ROOT}/src/common/hw_features_common.c
+    ${BK_WPA_ROOT}/src/common/ieee802_11_common.c
+    ${BK_WPA_ROOT}/src/common/wpa_common.c
+    ${BK_WPA_ROOT}/src/common/wpa_psk_cache.c
+    ${BK_WPA_ROOT}/src/common/dragonfly.c
+    ${BK_WPA_ROOT}/src/common/sae.c
+    ${BK_WPA_ROOT}/src/crypto/aes-siv.c
+    ${BK_WPA_ROOT}/src/crypto/aes-unwrap.c
+    ${BK_WPA_ROOT}/src/crypto/aes-wrap.c
+    ${BK_WPA_ROOT}/src/crypto/dh_group5.c
+    ${BK_WPA_ROOT}/src/crypto/dh_groups.c
+    ${BK_WPA_ROOT}/src/crypto/sha1-prf.c
+    ${BK_WPA_ROOT}/src/crypto/sha256-kdf.c
+    ${BK_WPA_ROOT}/src/crypto/sha256-prf.c
+    ${BK_WPA_ROOT}/src/crypto/sha384-kdf.c
+    ${BK_WPA_ROOT}/src/crypto/sha384-prf.c
+    ${BK_WPA_ROOT}/src/crypto/sha512-prf.c
+    ${BK_WPA_ROOT}/src/crypto/sha512-kdf.c
+    ${BK_WPA_ROOT}/src/crypto/tls_none.c
+    ${BK_WPA_ROOT}/src/crypto/crypto_mbedtls.c
+    ${BK_WPA_ROOT}/src/drivers/driver_beken.c
+    ${BK_WPA_ROOT}/src/drivers/driver_common.c
+    ${BK_WPA_ROOT}/src/drivers/drivers.c
+    ${BK_WPA_ROOT}/src/l2_packet/l2_packet_none.c
+    ${BK_WPA_ROOT}/src/rsn_supp/pmksa_cache.c
+    ${BK_WPA_ROOT}/src/rsn_supp/wpa.c
+    ${BK_WPA_ROOT}/src/rsn_supp/wpa_ie.c
+    ${BK_WPA_ROOT}/src/utils/common.c
+    ${BK_WPA_ROOT}/src/utils/crc32.c
+    ${BK_WPA_ROOT}/src/utils/eloop.c
+    ${BK_WPA_ROOT}/src/utils/os_none.c
+    ${BK_WPA_ROOT}/src/utils/wpa_debug.c
+    ${BK_WPA_ROOT}/src/utils/wpabuf.c
+    ${BK_WPA_ROOT}/wpa_supplicant/bssid_ignore.c
+    ${BK_WPA_ROOT}/wpa_supplicant/bss.c
+    ${BK_WPA_ROOT}/wpa_supplicant/config.c
+    ${BK_WPA_ROOT}/wpa_supplicant/config_none.c
+    ${BK_WPA_ROOT}/wpa_supplicant/ctrl_iface.c
+    ${BK_WPA_ROOT}/wpa_supplicant/events.c
+    ${BK_WPA_ROOT}/wpa_supplicant/main_supplicant.c
+    ${BK_WPA_ROOT}/wpa_supplicant/notify.c
+    ${BK_WPA_ROOT}/wpa_supplicant/op_classes.c
+    ${BK_WPA_ROOT}/wpa_supplicant/sme.c
+    ${BK_WPA_ROOT}/wpa_supplicant/wmm_ac.c
+    ${BK_WPA_ROOT}/wpa_supplicant/wpa_scan.c
+    ${BK_WPA_ROOT}/wpa_supplicant/wpa_supplicant.c
+    ${BK_WPA_ROOT}/wpa_supplicant/wpas_glue.c
+    ${BK_WPA_ROOT}/wpa_supplicant/wnm_sta.c)
+
+# The mbedtls subset crypto_mbedtls.c pulls in, measured from the vendor's
+# own 93-file build minus the lwIP/TLS-client port layer this image has no
+# use for.  If a link error ever names another mbedtls_ symbol, add its
+# module here rather than questioning the approach: every file in
+# mbedtls/library compiles under these flags in the vendor build.
+
+set(BK_WPA_MBEDTLS_SOURCES
+    ${BK_MBEDTLS}/mbedtls/library/aes.c
+    ${BK_MBEDTLS}/mbedtls/library/arc4.c
+    ${BK_MBEDTLS}/mbedtls/library/asn1parse.c
+    ${BK_MBEDTLS}/mbedtls/library/asn1write.c
+    ${BK_MBEDTLS}/mbedtls/library/bignum.c
+    ${BK_MBEDTLS}/mbedtls/library/ccm.c
+    ${BK_MBEDTLS}/mbedtls/library/cipher.c
+    ${BK_MBEDTLS}/mbedtls/library/cipher_wrap.c
+    ${BK_MBEDTLS}/mbedtls/library/cmac.c
+    ${BK_MBEDTLS}/mbedtls/library/constant_time.c
+    ${BK_MBEDTLS}/mbedtls/library/ctr_drbg.c
+    ${BK_MBEDTLS}/mbedtls/library/des.c
+    ${BK_MBEDTLS}/mbedtls/library/ecdh.c
+    ${BK_MBEDTLS}/mbedtls/library/ecdsa.c
+    ${BK_MBEDTLS}/mbedtls/library/ecp.c
+    ${BK_MBEDTLS}/mbedtls/library/ecp_curves.c
+    ${BK_MBEDTLS}/mbedtls/library/entropy.c
+    ${BK_MBEDTLS}/mbedtls/library/error.c
+    ${BK_MBEDTLS}/mbedtls/library/hmac_drbg.c
+    ${BK_MBEDTLS}/mbedtls/library/md.c
+    ${BK_MBEDTLS}/mbedtls/library/md5.c
+    ${BK_MBEDTLS}/mbedtls/library/nist_kw.c
+    ${BK_MBEDTLS}/mbedtls/library/oid.c
+    ${BK_MBEDTLS}/mbedtls/library/pk.c
+    ${BK_MBEDTLS}/mbedtls/library/pk_wrap.c
+    ${BK_MBEDTLS}/mbedtls/library/pkcs5.c
+    ${BK_MBEDTLS}/mbedtls/library/platform.c
+    ${BK_MBEDTLS}/mbedtls/library/platform_util.c
+    ${BK_MBEDTLS}/mbedtls/library/sha1.c
+    ${BK_MBEDTLS}/mbedtls/library/sha256.c
+    ${BK_MBEDTLS}/mbedtls/library/sha512.c
+    ${BK_MBEDTLS}/mbedtls-port/src/tls_mem.c)
+
+# Supplicant dirs FIRST (list.h!), then the full vendor include list.
+
+set(BK_WPA_INCLUDES
+    -I${BK_WPA_ROOT}/include/bk_private
+    -I${BK_WPA_ROOT}/hostapd
+    -I${BK_WPA_ROOT}/src/utils
+    -I${BK_WPA_ROOT}/src/ap
+    -I${BK_WPA_ROOT}/src/common
+    -I${BK_WPA_ROOT}/src/drivers
+    -I${BK_WPA_ROOT}/src
+    -I${BK_WPA_ROOT}/wpa_supplicant
+    -I${BK_WPA_ROOT}/bk_patch
+    -I${BK_MBEDTLS}/mbedtls/include
+    -I${BK_MBEDTLS}/mbedtls-port/inc
+    ${BK_WIFI_INCLUDES})
+
+add_library(bk_wifi_wpa OBJECT ${BK_WPA_SOURCES} ${BK_WPA_MBEDTLS_SOURCES})
+target_compile_options(bk_wifi_wpa PRIVATE
+                       ${BK_WPA_INCLUDES} ${BK_WIFI_DEFINES}
+                       ${BK_WIFI_MACHINE}
+                       -DMBEDTLS_CONFIG_FILE="tls_config.h"
+                       -Daes_encrypt=bk_wpa_aes_encrypt
+                       -Daes_decrypt=bk_wpa_aes_decrypt)
+
+# os_none.c: time_t without <time.h> on its include chain (newlib headers
+# leave it undefined), and the rand()-backed random pair renamed away so the
+# shim's arc4random_buf-backed versions win the link.
+
+set_source_files_properties(${BK_WPA_ROOT}/src/utils/os_none.c
+    TARGET_DIRECTORY bk_wifi_wpa
+    PROPERTIES COMPILE_OPTIONS
+    "-include;time.h;-Dos_get_random=bk_wpa_os_get_random_unused;-Dos_random=bk_wpa_os_random_unused")
+
+list(APPEND BK_WIFI_OBJECTS $<TARGET_OBJECTS:bk_wifi_wpa>)
+
+endif() # CONFIG_BK7258_WIFI_WPA
+
 # The closed MAC/PHY archives.  libwifi.a holds the 802.11 MAC that the
 # sources above call into; libcom_phy.a and libbk_phy.a are the radio, and
 # are already linked for BLE -- listing them again is harmless and keeps
