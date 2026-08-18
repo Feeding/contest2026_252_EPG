@@ -214,7 +214,9 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    另外 `wapi_scan_stat()` 会先用**一个字节**的缓冲区探一次,靠 `-E2BIG` / `-EAGAIN` 区分"有结果"和"还没好";返回 `OK` + 截断流会让它以为一个字节就够了。
 
-   **仍未做**:`encode` 字段恒为 `0xffff`(没发 `SIOCGIWENCODE`,`ap.caps` 已经拿到了,补一下即可);关联/收发数据尚未验证。
+   **网络已端到端跑通(2026-08-18 真机)**:`wapi scan` → `wapi essid`(开放 AP,carrier 随真实关联状态抬起)→ `ifconfig wlan0 dhcp`(拿到地址)→ `ping` 网关 5/5、**ping 公网 223.5.5.5 3/3**。数据通路两个方向都是拷贝式:TX 经 `bk7258_wifi_tx_alloc()`(`PBUF_RAW_TX`,96 字节 MSDU 头部空间,`rwnx_start_xmit` 就地包 sk_buff)→ `bmsg_tx_sender(p, vif)`;RX 在 `bk7258_wifi_rx_frame()`(厂商核心线程,任务上下文)`netpkt_alloc/copyin` 进环,`receive()` 弹出。**三条经验**:① `NETPKT_BUFLEN = CONFIG_IOB_BUFSIZE = 196`,整帧必分片,`netpkt_getdata()` 只能看到第一片,必须 copyout;② 链路状态只有 supplicant 收到 `WPA_CTRL_EVENT_CONNECT_IND` 才会推进,本移植把 `wpa_ctrl_event_copy` 桩改成转发到 glue 的事件桥(`bk7258_wifi_wpa_event`),CONNECT_IND/DISCONNECT_IND 用开源的 `mhdr_set_station_status()` 置状态、断开时降 carrier —— 不桥接则关联在空中成功而状态永远 IDLE;③ ping 需要 `CONFIG_NET_ICMP_SOCKET`(文档没提)+ `CONFIG_SYSTEM_PING`(`NETUTILS_PING` 只是库),DHCP 走 `ifconfig wlan0 dhcp`(`CONFIG_NETUTILS_DHCPC`)。
+
+   **仍未做**:WPA2/WPA3(需移植 supplicant,关联通路已验证、缺 RSN IE 和四次握手);`wapi psk`/`auth` 两个已知解析 bug(supplicant 上来前无影响);`encode` 列的 `SIOCGIWENCODE` 已发但值是布尔化的 enable/disable;`ifdown` 空实现、二次 `ifup` 会重入厂商一次性初始化。
 
    三个必须做对、做错都不报错的接缝(全部已实现,见 `chip/bk7258_wifi_shim.c` 头注释的 REAL/ADEQUATE/PENDING 分类):
    - **`bk_wifi_init()` 带 config 参数**。手写 `extern int bk_wifi_init(void)` 能编能链,厂商那句专防此事的 `config->os_funcs == NULL` 检查会被寄存器残留值躲过,故障出现在三十层之后的闭源代码里。凡是厂商 API 一律用它自己的头,别凭记忆写原型。
