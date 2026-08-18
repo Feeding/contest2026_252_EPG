@@ -218,7 +218,7 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    **WPA2 与 WPA3-SAE 均已端到端跑通(2026-08-18 真机,fbd9db6 + 后续)**。SAE 首连曾以 STKOF(CFSR bit20,Armv8-M 硬件栈限位)炸在 wpas 线程 —— 厂商 5120 字节栈是按 wolfssl 捷径算的,mbedtls 的 P-256 要 15K(厂商注释自己写了),OSI 已把 wpas 线程栈下限提到 16K;厂商的 FreeRTOS 上同样的溢出是静默堆腐蚀,STKOF 是移植做得更好的证据。:`CONFIG_BK7258_WIFI_WPA` 编入厂商 wpa_supplicant 全套 78 文件 + mbedtls 32 文件子集,`wapi psk` + `wapi essid` → 四次握手 → carrier 在 `WPA_COMPLETED` 才抬 → 加密链路上 DHCP + ping 公网 3/3。要点:supplicant 自建 VIF(我们不再预建);扫描走 `wlan_sta_scan_once()`、结果从 BSS 表取一次缓存到下一轮(`wlan_sta_scan_result` 每次调用后冲表);完成信号靠 supplicant 发的 `EVENT_WIFI_SCAN_DONE` 落在我们的 `bk_event_post` 桥上;`sa_station_init()` 必须先于 `wlan_sta_enable()`(否则信道表全空,`freq 0xaaaa`);`aes_encrypt/aes_decrypt` 编译期改名避开 NuttX libcrypto;全部随机数改绑 `arc4random_buf()`(厂商原树是 `rand()`,nonce/SAE 标量都从这儿出)。`wapi psk` 的 `iw_encode_ext` 解析 bug 已随手修掉。
 
-   **仍未做**:信号强度列在 WPA 构建下是近似映射(ApPower 0-100 反推 dBm),偏低;`ifdown` 空实现、二次 `ifup` 会重入厂商一次性初始化;supplicant 连接失败后的重试循环没有退出钩子(断电或 `wapi disconnect` 止)。
+   **尾巴已清(2026-08-18 真机)**:`ifdown` 真实断开+降 carrier(厂商栈无 deinit 路径,保持运行);`ifup` 幂等(`bk_wifi_init` 一次性,重入会在活线程上重建队列);`wapi disconnect` 实测能停掉 supplicant 的连接重试循环;RSSI 列修正 —— `ApPower` 声明写着 0-100 实为**原始 dBm**(ctrl_iface.c:295 直存 `bss->level`),按文档反推曾低 60-80dB;`wapi auth` 现在按 `param.flags` 的索引存值。**测试注意**:nsh 没有 `ifconfig wlan0 down`,是独立的 `ifdown`/`ifup` 命令,"down" 会被当地址解析。
 
    三个必须做对、做错都不报错的接缝(全部已实现,见 `chip/bk7258_wifi_shim.c` 头注释的 REAL/ADEQUATE/PENDING 分类):
    - **`bk_wifi_init()` 带 config 参数**。手写 `extern int bk_wifi_init(void)` 能编能链,厂商那句专防此事的 `config->os_funcs == NULL` 检查会被寄存器残留值躲过,故障出现在三十层之后的闭源代码里。凡是厂商 API 一律用它自己的头,别凭记忆写原型。
