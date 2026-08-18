@@ -68,6 +68,10 @@
 #include "bk7258_memorymap.h"
 #include "chip.h"
 
+/* Cross-domain contract with bk7258_wifi_glue.c / bk7258_wifi.c. */
+
+#include "bk7258_wifi_scan.h"
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -775,9 +779,17 @@ int wpa_ctrl_event(int event, void *data)
 
 int wpa_ctrl_event_copy(int event, void *data, int len)
 {
-  UNUSED(event);
-  UNUSED(data);
-  UNUSED(len);
+  /* Two of these events carry the link state, and with no supplicant to
+   * receive them nobody would ever advance it -- association succeeded on
+   * the air while the state read IDLE forever.  The bridge in
+   * bk7258_wifi_glue.c consumes CONNECT_IND and DISCONNECT_IND; the rest
+   * remain honestly unported.
+   */
+
+  if (bk7258_wifi_wpa_event(event, data, len) == 0)
+    {
+      return 0;
+    }
 
   BK7258_WIFI_PENDING("wpa_ctrl_event_copy");
   return -1;

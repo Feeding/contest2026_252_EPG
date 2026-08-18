@@ -111,6 +111,16 @@ void bk7258_wifi_tx_abort(FAR void *frame);
 
 void bk7258_wifi_rx_frame(int iface, FAR const void *data, unsigned int len);
 
+/* Link-state event bridge.  The shim's wpa_ctrl_event_copy() stub forwards
+ * every vendor event to bk7258_wifi_wpa_event() (in the glue, which can see
+ * the event enum); CONNECT_IND / DISCONNECT_IND advance the vendor's link
+ * state there, and a disconnect additionally calls bk7258_wifi_link_lost()
+ * (in the driver) to lower the carrier.
+ */
+
+int bk7258_wifi_wpa_event(int event, FAR const void *data, int len);
+void bk7258_wifi_link_lost(void);
+
 /* How many APs the last completed scan found.  Touches no reference count,
  * so it is safe to call without holding the set.
  */

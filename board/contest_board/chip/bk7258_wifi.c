@@ -470,6 +470,29 @@ void bk7258_wifi_rx_frame(int iface, FAR const void *data, unsigned int len)
 }
 
 /****************************************************************************
+ * Name: bk7258_wifi_link_lost
+ *
+ * Description:
+ *   The AP dropped us -- SM_DISCONNECT_IND arrived, relayed by the event
+ *   bridge in bk7258_wifi_glue.c.  Lower the carrier so the stack stops
+ *   routing to an interface that can no longer deliver.  Runs on the
+ *   vendor core thread; carrier_off only schedules work, so that is legal.
+ *
+ ****************************************************************************/
+
+void bk7258_wifi_link_lost(void)
+{
+  FAR struct bk7258_wifi_dev_s *priv = &g_bk7258_wifi;
+
+  if (priv->connected)
+    {
+      priv->connected = false;
+      netdev_lower_carrier_off(&priv->dev);
+      syslog(LOG_WARNING, "wifi: link lost, carrier down\n");
+    }
+}
+
+/****************************************************************************
  * Name: bk7258_wifi_connect / bk7258_wifi_disconnect
  ****************************************************************************/
 

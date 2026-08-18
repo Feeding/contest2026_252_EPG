@@ -69,6 +69,10 @@
 
 #include "bk_private/bk_rw.h"
 
+/* WPA_CTRL_EVENT_*, for the event bridge below. */
+
+#include "wpa_ctrl.h"
+
 #include "bk7258_wifi_scan.h"
 
 
@@ -319,6 +323,75 @@ int bk7258_wifi_link_state(void)
     }
 
   return (int)info.state;
+}
+
+/****************************************************************************
+ * Name: bk7258_wifi_wpa_event
+ *
+ * Description:
+ *   The supplicant's side of the connect/disconnect notifications, without
+ *   the supplicant.
+ *
+ *   Why this exists: association against an open AP succeeds on the air --
+ *   mm_set_vif_state, AID assigned, beacons tracked -- and the link state
+ *   still reads IDLE forever.  The state variable
+ *   (mhdr_get_station_status()) is only ever advanced by the supplicant
+ *   when it receives WPA_CTRL_EVENT_CONNECT_IND, and this port stubs the
+ *   whole wpa_ctrl surface, so nobody advanced it.  The stubbed events are
+ *   exactly where the information leaves the vendor stack
+ *   (mhdr_connect_ind, rw_msg_rx.c:347; SM_DISCONNECT_IND, :1384), so this
+ *   is the honest place to stand in.
+ *
+ *   Called from the shim's wpa_ctrl_event_copy() stub with whatever event
+ *   the vendor posted.  Handles the two that carry link state; everything
+ *   else stays a logged stub.  Runs on the vendor core thread.
+ *
+ * Returned Value:
+ *   0 if the event was consumed here, -1 for events not handled.
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_wpa_event(int event, const void *data, int len)
+{
+  wifi_linkstate_reason_t info;
+
+  switch (event)
+    {
+      case WPA_CTRL_EVENT_CONNECT_IND:
+        {
+          const struct sm_connect_ind *ind = data;
+
+          if (ind == NULL || len < (int)sizeof(*ind))
+            {
+              return -1;
+            }
+
+          info.state = ind->status_code == 0 ?
+                       WIFI_LINKSTATE_STA_CONNECTED :
+                       WIFI_LINKSTATE_STA_CONNECT_FAILED;
+          info.reason_code = WIFI_REASON_MAX;
+          mhdr_set_station_status(info);
+          return 0;
+        }
+
+      case WPA_CTRL_EVENT_DISCONNECT_IND:
+        {
+          info.state = WIFI_LINKSTATE_STA_DISCONNECTED;
+          info.reason_code = WIFI_REASON_MAX;
+          mhdr_set_station_status(info);
+
+          /* The AP is gone; the netdev must stop offering the route.  The
+           * driver lowers the carrier -- from this (task) context that is
+           * legal, it only schedules work.
+           */
+
+          bk7258_wifi_link_lost();
+          return 0;
+        }
+
+      default:
+        return -1;
+    }
 }
 
 int bk7258_wifi_scan_count(void)
