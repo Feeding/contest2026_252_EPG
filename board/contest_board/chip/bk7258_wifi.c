@@ -286,6 +286,20 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
        * a whole.
        */
 
+      /* bk_wifi_init() is one-shot: the vendor stack has no deinit path,
+       * and running it twice re-creates its threads and queues over the
+       * live ones.  "ifconfig wlan0 down; ifconfig wlan0 up" therefore
+       * re-enters here with the stack already running, and must not
+       * initialise it again.
+       */
+
+      static bool vendor_ready = false;
+
+      if (vendor_ready)
+        {
+          return OK;
+        }
+
       bk7258_wifi_zeroing(true);
       ret = bk7258_wifi_vendor_init();
 
@@ -294,6 +308,8 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
           nerr("ERROR: bk_wifi_init: %d\n", ret);
           return -EIO;
         }
+
+      vendor_ready = true;
 
       /* Adopt the address the radio actually uses.  Until this ran, wlan0
        * came up with d_mac all zeroes while the MAC associated as its real
@@ -328,8 +344,13 @@ static int bk7258_wifi_ifup(FAR struct netdev_lowerhalf_s *dev)
 
 static int bk7258_wifi_ifdown(FAR struct netdev_lowerhalf_s *dev)
 {
-  UNUSED(dev);
-  return OK;
+  /* Administrative down: leave the AP cleanly and stop offering the route.
+   * The vendor stack itself stays up -- it has no deinit path, which is
+   * also why ifup() refuses to run its one-shot init twice.  Downing the
+   * interface is about the link, not the radio.
+   */
+
+  return bk7258_wifi_disconnect(dev);
 }
 
 /****************************************************************************
@@ -603,6 +624,15 @@ static int bk7258_wifi_disconnect(FAR struct netdev_lowerhalf_s *dev)
 {
   FAR struct bk7258_wifi_dev_s *priv = (FAR struct bk7258_wifi_dev_s *)dev;
 
+#ifdef CONFIG_BK7258_WIFI_WPA
+  /* Tell the supplicant, not just the netdev.  Besides deauthenticating
+   * cleanly, this is what stops the supplicant's connect-retry loop -- a
+   * failed join otherwise keeps issuing directed scans forever.
+   */
+
+  bk7258_wifi_sta_disconnect();
+#endif
+
   priv->connected = false;
   netdev_lower_carrier_off(dev);
   return OK;
@@ -744,9 +774,18 @@ static int bk7258_wifi_auth(FAR struct netdev_lowerhalf_s *dev,
 {
   FAR struct bk7258_wifi_dev_s *priv = (FAR struct bk7258_wifi_dev_s *)dev;
 
+  /* One SIOCSIWAUTH carries many different parameters, disambiguated by
+   * the index in flags -- wapi psk sends IW_AUTH_WPA_VERSION and
+   * IW_AUTH_CIPHER_PAIRWISE back to back.  The first version ignored the
+   * index and let the second call overwrite the first's value.
+   */
+
   if (set)
     {
-      priv->auth = iwr->u.param.value;
+      if ((iwr->u.param.flags & IW_AUTH_INDEX) == IW_AUTH_WPA_VERSION)
+        {
+          priv->auth = iwr->u.param.value;
+        }
     }
   else
     {

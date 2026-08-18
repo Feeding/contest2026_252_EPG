@@ -69,6 +69,10 @@ int bk7258_wifi_connect_open(const char *ssid, int ssid_len, int *status);
 
 int bk7258_wifi_connect_sta(const char *ssid, int ssid_len, const char *key);
 
+/* Leave the AP and cancel the supplicant's retry loop (WPA builds). */
+
+int bk7258_wifi_sta_disconnect(void);
+
 /* The station MAC as the vendor stack uses it on air.  Valid only after
  * bk7258_wifi_vendor_init().  Returns 0 on success.
  */

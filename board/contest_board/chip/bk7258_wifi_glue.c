@@ -300,11 +300,13 @@ int bk7258_wifi_scan_get(int index, struct bk7258_scan_ap_s *ap)
   ap->ssid[32] = '\0';
   ap->channel  = (uint8_t)item->channel;
 
-  /* ApPower is the vendor's 0..100 quality scale, not dBm; map it back to
-   * a dBm-ish monotonic value for the wireless API.
+  /* ApPower, despite its declaration comment ("min:0, max:100"), is the
+   * raw dBm level on this fork: the ctrl handler stores bss->level into it
+   * unconverted (ctrl_iface.c:295).  The first version here inverted the
+   * documented 0..100 scale and reported every AP 60-80 dB too low.
    */
 
-  ap->rssi     = (int32_t)item->ApPower / 2 - 100;
+  ap->rssi     = (int32_t)(int8_t)item->ApPower;
   ap->caps     = 0;
   ap->security = (int)item->security;
   return 0;
@@ -488,6 +490,22 @@ int bk7258_wifi_connect_sta(const char *ssid, int ssid_len, const char *key)
  *   what this forwards.
  *
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: bk7258_wifi_sta_disconnect
+ *
+ * Description:
+ *   Leave the AP through the supplicant.  wlan_sta_disconnect() both
+ *   deauthenticates and cancels the supplicant's connect-retry loop; the
+ *   same call heads bk_wlan_start_sta(), so a new connect after this is
+ *   exactly the vendor's own resequence.
+ *
+ ****************************************************************************/
+
+int bk7258_wifi_sta_disconnect(void)
+{
+  return wlan_sta_disconnect();
+}
 
 bk_err_t bk_event_post(event_module_t module, int event_id,
                        void *event_data, size_t event_data_size,
