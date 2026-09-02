@@ -88,7 +88,16 @@ endif()
 set(BK_AVDK_BT_LIBS
     "${BK_AVDK_ROOT}/cp/components/bk_libs/bk7258/libs")
 
-set(BK_IDK_LIBS /Users/apple/app/github.com/bk_idk/components/bk_libs/bk7258/libs)
+# The bk_idk checkout, located the same way as the AVDK one above: an
+# environment variable if the builder set one, otherwise a sibling of the
+# openvela workspace.  It used to be an absolute path from one developer's
+# machine, which made the tree unbuildable anywhere else.
+
+set(BK_IDK_ROOT "$ENV{BK_IDK_ROOT}")
+if(NOT BK_IDK_ROOT)
+  get_filename_component(BK_IDK_ROOT "${NUTTX_DIR}/../../bk_idk" ABSOLUTE)
+endif()
+set(BK_IDK_LIBS "${BK_IDK_ROOT}/components/bk_libs/bk7258/libs")
 
 if(EXISTS ${BK_IDK_LIBS}/libbluetooth_controller_ble.a)
   list(APPEND SRCS bk7258_ble.c bk7258_ble_shim.c bk7258_vnd_cal.c

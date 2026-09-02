@@ -21,8 +21,14 @@
 #
 # ############################################################################
 
-if(NOT DEFINED BK_IDK_ROOT)
-  set(BK_IDK_ROOT /Users/apple/app/github.com/bk_idk)
+# Same lookup as chip/CMakeLists.txt: BK_IDK_ROOT from the environment if
+# the builder set one, otherwise a sibling of the openvela workspace.
+
+if(NOT BK_IDK_ROOT)
+  set(BK_IDK_ROOT "$ENV{BK_IDK_ROOT}")
+endif()
+if(NOT BK_IDK_ROOT)
+  get_filename_component(BK_IDK_ROOT "${NUTTX_DIR}/../../bk_idk" ABSOLUTE)
 endif()
 
 set(BK_WIFI_SRC ${BK_IDK_ROOT}/components/bk_wifi/src)
