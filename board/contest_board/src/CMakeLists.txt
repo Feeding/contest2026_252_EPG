@@ -47,6 +47,10 @@ if(CONFIG_LCD)
   list(APPEND SRCS bk7258_gc9d01.c bk7258_swspi.c)
 endif()
 
+if(CONFIG_BK7258_BATTERY)
+  list(APPEND SRCS bk7258_battery.c)
+endif()
+
 target_sources(board PRIVATE ${SRCS})
 
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR})
@@ -169,4 +173,17 @@ if(CONFIG_CRYPTO)
     100
     SRCS
     md5_test.c)
+endif()
+
+if(CONFIG_BK7258_BATTERY)
+  # Instrument for the battery gauge (see src/batttest.c).
+  nuttx_add_application(
+    NAME
+    batttest
+    STACKSIZE
+    2048
+    PRIORITY
+    100
+    SRCS
+    batttest.c)
 endif()

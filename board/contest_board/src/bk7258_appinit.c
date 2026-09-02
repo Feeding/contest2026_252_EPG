@@ -60,6 +60,9 @@
 #ifdef CONFIG_BK7258_TIMER
 #  include "bk7258_timer.h"
 #endif
+#ifdef CONFIG_BK7258_BATTERY
+#  include "bk7258_battery.h"
+#endif
 #ifdef CONFIG_BK7258_FLASH
 #  include <nuttx/mtd/mtd.h>
 #  include "bk7258_flash.h"
@@ -189,6 +192,14 @@ int board_app_initialize(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: bk7258_timer_oneshot_register: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_BK7258_BATTERY
+  ret = bk7258_battery_register("/dev/batt0");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: bk7258_battery_register: %d\n", ret);
     }
 #endif
 

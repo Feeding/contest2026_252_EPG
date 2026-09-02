@@ -439,6 +439,21 @@ config BK7258_SELFRESET_PROBE
 
 endif # ARCH_CHIP_CUSTOM
 
+config BK7258_BATTERY
+	bool "Battery gauge (/dev/batt0)"
+	default n
+	select BATTERY_GAUGE
+	---help---
+		Cell voltage, charge percentage and charger state for the
+		ConvoAI Kit R1.  Voltage comes from SARADC channel 0, the
+		charger's two status pins are GPIO51 and GPIO26, and every
+		constant is taken from the vendor's own battery monitor
+		(bk_avdk_smp bk_batt_monitor/bat_monitor.c).
+
+		Charging itself needs no software: the ETA4322 on this board
+		runs on its own and exposes no control interface.  This driver
+		only reports.
+
 config BK7258_HCI_TRANSPORT
 	bool "H4 HCI transport character device"
 	default n
