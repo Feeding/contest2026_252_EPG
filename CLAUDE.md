@@ -106,7 +106,7 @@ CONFIG_ARCH_BOARD_CUSTOM_DIR="../vendor/openvela/boards/contest2026_252_board"
 | ~~`arm_earlyserialinit`~~ | **定义了但从没被调用**——早期控制台走 `bk7258_lowputc()`，`__start` 不调它，NuttX arch 侧也没有调用点。它里面那句 `isconsole = true` 因此从未执行，Ctrl-C 曾经整条链失效就是这么来的（PORTING_NOTES 十七章）。动它之前先读那一节。 | `chip/bk7258_serial.c` |
 | `up_putc` | OS 内部日志出口 | `chip/bk7258_serial.c` |
 | `arm_serialinit` | `uart_register("/dev/console", ...)` | `chip/bk7258_serial.c` |
-| `up_timer_initialize` | 系统节拍 | `chip/bk7258_timerisr.c`（SysTick） |
+| `up_timer_initialize` | 系统时基 | `chip/bk7258_timerisr.c`（arch_alarm，oneshot backing 在 AON RTC） |
 | 中断 `up_*` + `irq_attach` | 使能/屏蔽/优先级，含 NVIC 之前那道 SoC 路由矩阵 | `chip/bk7258_irq.c` |
 | `up_allocate_heap` | 起始 = `ebss + CONFIG_IDLETHREAD_STACKSIZE`，大小 = RAM 末 − 起始 | `chip/bk7258_allocateheap.c` |
 
@@ -147,9 +147,9 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
 1. ~~**定时器用的是 `arch_timer`（SysTick）**~~ —— **此条已过时**。时基早已换成官方推荐的 `arch_alarm`：AON RTC 的 TICK 比较单元backing oneshot lower-half，`chip/bk7258_timerisr.c:146` 调 `up_alarm_set_lowerhalf()`，`.config` 里 `CONFIG_ALARM_ARCH=y` / `CONFIG_ONESHOT=y` 而 `CONFIG_ARMV8M_SYSTICK` 未设（见 PORTING_NOTES 十四章）。**仍然为真的部分**：tickless 未开（`CONFIG_SCHED_TICKLESS` is not set）。
 
-   另有一条**新差距**：xTS 用例 1.3.13 要求 arch alarm 方案暴露 `/dev/oneshot0` 供 `cmocka_driver_oneshot` 驱动，本仓没注册。原因是 AON RTC 只有两个硬件比较单元，`TICK` 已给系统时基、`UPPER` 已给 `/dev/rtc0` 闹钟（`chip/bk7258_rtc.h:64-65`），第三路得另起片内通用 TIMER 外设——那是个新驱动，尚未做。
+   ~~另有一条**新差距**：`/dev/oneshot0` 未注册~~ —— **此条已过时**。AON RTC 只有两个硬件比较单元（`TICK` 给系统时基、`UPPER` 给 `/dev/rtc0`），第三路已另起片内通用 TIMER 外设：`CONFIG_BK7258_TIMER=y`，注册在 [src/bk7258_appinit.c:188](board/contest_board/src/bk7258_appinit.c#L188)，1.3.13 真机通过（PORTING_NOTES 十九章）。
 2. **`board_app_finalinitialize` 未实现**（`CONFIG_BOARDCTL_FINALINIT` 未开）。目前没有需要它的场景，新增应用级收尾初始化时再补。
-3. **xTS 精简集：已上板跑过，14 项通过、3 项缺陷、3 项跑不了。** 官方把「通用自测用例」列为**必测**。配置层面按清单逐条补齐见 PORTING_NOTES 十六章，**真机执行记录见十七章**。
+3. **xTS 精简集：首轮上板 14 项通过、3 项缺陷、3 项跑不了；此后 1.3.13 Timer、1.3.15 看门狗、1.3.5 块设备与片内 flash、1.3.16 RNG 四项已逐一补齐并真机通过（详见本条下方各段）。** 官方把「通用自测用例」列为**必测**。配置层面按清单逐条补齐见 PORTING_NOTES 十六章，**真机执行记录见十七章**。
 
    **通过**：内存、调度、ostest、getprime、mm、scanftest、helloxx、popen、pipe、md5、cxxtest、fstest、ramtest、RTC（3/3）、crypto（8/8）。
 
@@ -173,8 +173,8 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
    - ⚠️ **该压测是破坏性的**：`SECTORS_RANGE 0.95`，对整卡 95% 扇区写随机数据。它擦掉过一次原厂表情素材。跑任何带 stress 的用例前先读源码、先备份目标盘。
 
    **两个配置，别混用**：
-   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因、`/dev/oneshot0`）。flash 45.09%。
-   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app。flash 38.93%。跑完必测把 `nsh` 烧回去。
+   - `configs/nsh` —— 产品镜像，含轻量必测项（`/etc` ROMFS、`md5_test`、`BCH`、复位原因、`/dev/oneshot0`）。flash 45.10%。
+   - `configs/xts` —— 验证镜像，全套必测 + C++（libcxx），剥掉闭源 BLE 栈和 eyes/face/snap 三个演示 app。flash **60.40%**（38.93% 是 2026-08-18 加入 wpa_supplicant + mbedtls 之前的数字）。跑完必测把 `nsh` 烧回去。
 
    **app 分区已扩到 3648 KB**（原 1728 KB），所以"装不下"不再是常态约束——两个配置现在都有一倍以上余量。扩的依据见 `scripts/ld.script` 顶部：bootloader 按名字查分区、只取 offset、**不读 size 也不校验镜像**（README 第九章反汇编实锤），所以镜像可以长过 app 分区；长过去覆盖的是 app1/app2（CPU1/CPU2 镜像，而 `start_cpu1_core()` 由 CPU0 应用代码调用、我们从不调，那两个核从未启动）和 download（OTA 暂存，本仓不做 OTA）。上限是 `usr_config`（0x3DA000），它和其上的 `rf_firmware`/`net_param`（出厂 RF 校准，BLE 依赖）**必须保留**。
 
@@ -182,11 +182,11 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    厂商分区表累加正好 4096 KB，是按 4 MB 型号画的，而本板是 8 MB：**上半部 4 MB 未分配**。它不能用来扩可执行镜像（bootloader 把 app 当作从 0x11000 起的一整块连续镜像），只能做数据——已给片内 flash MTD 用（`0x500000..0x7F0000`）。若要放只读大资源（模型权重、字体）可直接 XIP 寻址、不占 RAM，但要写 **CRC 编码后**的字节，且那片区域就不能再当原始 MTD 用（`crc_en` 是全局一位）。
 
-   **已知补不上的一项**（原因见 PORTING_NOTES 十六章末）：1.3.16 RNG（**已跑通，但只能分批**）。
+   **唯一不能一次跑完的一项**：1.3.16 RNG —— 15 项全部达标，但受 `_POSIX_STREAM_MAX` 硬编码所限**只能分三批**跑（原因见 PORTING_NOTES 十六章末）。
 
    **1.3.5 片内 flash MTD 已补齐并真机通过**（`chip/bk7258_flash.c` → `/dev/mtd0` + `/dev/mtdblock0`，`CONFIG_BK7258_FLASH`，详见 PORTING_NOTES 二十章）。区间 `0x500000..0x7F0000`（2.94 MB），是实测挑出来的：厂商分区表累加正好占满 `0x400000`，而 8MB 芯片**最后 6 个扇区在用**，`0x7fe000` 开头是 `"TLV"` 出厂校准数据（BLE 很可能靠它），所以上边界留了整 64 KB。驱动对每一条擦写路径做区间校验，越界直接 `-EFAULT`。
 
-   三个会静默失败的点：① 控制器在 `0x44030000`（`dev_id` 读出 `"FLSH"`），厂商树里另一套被 `CONFIG_SOC_BK7256XX` 包着、指向 `0x00803000` 的定义是陷阱；② 软件通路是**物理地址原始字节**，CRC 只在 XIP 取指通路上，MTD 完全不涉及；③ 芯片**出厂全片写保护**（BP=`0x1f`），不解保护写入会被 flash 静默丢弃、读回来像驱动是死的。诊断工具 `flashtest` 留在树里。产品镜像 `configs/nsh` **未启用**（已 95.16%，且对 demo 无用途）。
+   三个会静默失败的点：① 控制器在 `0x44030000`（`dev_id` 读出 `"FLSH"`），厂商树里另一套被 `CONFIG_SOC_BK7256XX` 包着、指向 `0x00803000` 的定义是陷阱；② 软件通路是**物理地址原始字节**，CRC 只在 XIP 取指通路上，MTD 完全不涉及；③ 芯片**出厂全片写保护**（BP=`0x1f`），不解保护写入会被 flash 静默丢弃、读回来像驱动是死的。诊断工具 `flashtest` 留在树里。产品镜像 `configs/nsh` **未启用**（对 demo 无用途）。~~"已 95.16%"~~ 那个理由已过时：95% 是 app 分区扩容前按 1728 KB 算的，扩到 3648 KB 后同一镜像是 **45.10%**。
 
    ⚠️ **补它的过程撞出一个时基缺陷，已修，影响所有配置**：`bk7258_rtc_arm()` 对已过期目标退到「最小 1 tick」= 31 µs，而 AON 在常开域、从 CPU 侧写比较寄存器**本身就要最多 31 µs 才生效**——比较值可能在写入落地前被计数器越过，比较器靠**相等**匹配，于是永不匹配、时基永久死亡。现象是**板子答得动却没有时钟**(UART 走自己的中断，所以控制台照常回显)，`sleep` 永不返回，喂狗随之停止，恰好一个看门狗周期后咬。修法是把余量做进值里(最小 4 tick)，**不是**写完回读验证——试过，无效，因为回读那一刻新值还在路上。同一条跨时钟域规则本仓已踩第二次(十九章 TIMER 的 W1C 位)。
 
@@ -196,7 +196,7 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 
    这块的三个坑都会**静默失败**，动它之前先看文件头注释：① 计数时钟要靠写 `global_ctrl` 的 `soft_reset` 才启动，只开系统控制器那边的门控不够——不写这一位，通道使能了、终值装了，读回恒零且握手永不完成，而 `dev_id` 照样读出 `"TIMR"`、寄存器照样存得住值；② 没有独立中断使能位，`timerN_int_en` 是读回即状态、写 1 清除；③ 清中断必须自旋到读回为 0（跨 26 MHz 时钟域），否则处理函数立即重入。诊断工具 `timertest` 留在树里（读三个时钟位 + 握手是否超时 + 计数增量，四个实验一次跑完）。
 
-   **WiFi:厂商 MAC 已链入并能在板上跑到 `mm_init`**（详见 PORTING_NOTES 二十一章）。
+   **WiFi：已端到端跑通**——扫描、关联、DHCP、ping 公网，WPA2 与 WPA3-SAE 均真机验证（详见 PORTING_NOTES 二十一章）。~~"链入并跑到 `mm_init`"~~ 是本条最初的标题，早已过时。
 
    ⚠️ **此前"卡在 `sm_task.h` / `ps.h` 两个没发布头文件"的结论是错的,已撤回。** 那两个 `#include` 都在 `#if NX_VERSION > NX_VERSION_PACK(6,22,0,0)` 里,而本树是 6.8.2.0,预处理器根本走不到。错因是 grep 到 include 行就下结论、没看它被什么守着。`components/bk_wifi/src` 的 **33 个源文件按发布原样全部编过**,不需要向厂商索要任何东西。同批被推翻的还有"`bk_idk` 是声网定制裁剪版"(`git remote` 是 `bekencorp/bk_idk`,两份 SDK 都是官方版)。
 
@@ -245,4 +245,5 @@ python3 board/contest_board/tools/bk_crc_pack.py cmake_out/contest2026_252_board
 - **公共仓零改动**：`nuttx/`、`packages/`、`vendor/` 一行不能改，全部改动落在本仓。
 - **硬件事实要有出处**：寄存器、中断号、引脚复用值必须标明来自 Datasheet 或 `bk_idk` SDK，不靠推断。
 - **画面/行为只认真机**：编译通过不等于跑通，结论以真机取证为准。
+- **结论变了，先改标题和数字，再追加取证**：新发现总是往段落下方追加，上方的小标题、百分比和「尚未/已知/不支持」这类断言没人回头改——而读者是从上往下读的，看到第一句就走了。2026-08-29 核文档，13 处过时里 **5 处是同一节内部前后矛盾**：小标题写「跑到 `mm_init`」而它下面第一句就是「该记录已过时」；同一节里 `configs/nsh` 的 flash 占用同时写着 45.09% 和 95.16%（后者是 app 分区扩容前按 1728 KB 算的）；「`/dev/oneshot0` 尚未做」与「1.3.13 已通过」并排站着。**推翻旧结论时先划掉旧断言、改掉旧数字，再往下追加新证据；改完 grep 一遍同一节里的百分比和状态词。**
 - **加新 CONFIG 后必须 `distclean` 再编**：cmake 只在初次配置时把 defconfig 展开成 `.config`，之后的 `olddefconfig` 拿的是已有 `.config`，**新加的行会被静默无视**（构建照样成功）。编完 grep 最终 `.config` 确认，比对 `cmake_out/<board>/defconfig.orig` 能看到 cmake 实际吃进去的快照。

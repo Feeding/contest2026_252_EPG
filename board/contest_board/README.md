@@ -24,7 +24,7 @@ board/contest_board/
 │   ├── bk7258_clockconfig.[ch] # 外设时钟门控与时钟源选择
 │   ├── bk7258_start.c          # 复位入口：VTOR/FPU/.data/.bss → nx_start()
 │   ├── bk7258_irq.c            # NVIC 中断控制
-│   ├── bk7258_timerisr.c       # SysTick 系统节拍
+│   ├── bk7258_timerisr.c       # 系统时基（arch_alarm，backing 在 AON RTC）
 │   ├── bk7258_serial.c         # UART 字符设备驱动
 │   ├── bk7258_lowputc.c        # 早期调试输出
 │   ├── bk7258_allocateheap.c
@@ -249,7 +249,7 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 > I2C、双屏 QSPI 战役、eyes 动画）见 **[PORTING_NOTES.md](PORTING_NOTES.md)**。
 > 本章下方各小节保留为芯片层启动阶段的历史取证记录。
 
-- [x] 芯片层：启动、中断、时钟、GPIO、UART、SysTick、堆
+- [x] 芯片层：启动、中断、时钟、GPIO、UART、时基（arch_alarm / AON RTC）、堆
 - [x] 板级层：defconfig、链接脚本、板级初始化
 - [x] 构建集成：openvela CMake 构建通过，干净重建可复现
 - [x] 镜像布局：`_vectors` 位于镜像首字节，SP / 复位地址正确
@@ -266,6 +266,15 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 - [x] `eyes` 机器人眼动画应用（17fps 实测）
 - [x] AON RTC（`/dev/rtc0` + 系统时钟源，计数率实测判定 32000 Hz ROSC）
 - [x] 看门狗字符驱动（`/dev/watchdog0`，`wdog` 真机验证会咬人，PORTING_NOTES 十四章）
+- [x] PSRAM 16MB（`free` 17.1MB + 五点自检）与 SD NAND（FAT 挂载/写读/重挂持久）
+- [x] 摄像头 GC2145：SCCB 验明正身 + DVP/JPEG 取流，`snap` 落盘 640×480 主机解码成功（七点五 / 七点六章）
+- [x] 音频：片内 DAC 扬声器 + ADC 麦克风，`face REC` 录放闭环（十二章）
+- [x] 原生表情播放管线：SD 读 → 硬件 JPEG 解码 → DMA2D → 双屏 blast，**22.4fps**（十一章）
+- [x] 通用 TIMER 驱动（`/dev/oneshot0`，`CONFIG_BK7258_TIMER`，xTS 1.3.13 通过，十九章）
+- [x] 片内 flash MTD（`/dev/mtd0` + `/dev/mtdblock0`，`CONFIG_BK7258_FLASH`；仅 `configs/xts` 启用，二十章）
+- [x] BLE：闭源控制器上 NuttX，接收与广播均真机验证（十三章）；host 链接崩溃已结案（二十二章）
+- [x] WiFi：扫描 / 关联 / DHCP / ping 公网，WPA2 与 WPA3-SAE 端到端（二十一章）
+- [x] xTS 必测集：`configs/xts` 上逐项跑过，含 RTC、看门狗、Timer、块设备、RNG（十六 / 十七章）
 
 ### 内存布局约束（实测所得）
 
@@ -281,8 +290,15 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 把它们搬到 `0x28040000`（栈仍用已知可用的地址）则死在 `bk7258_clockconfig()` 里。
 **能当栈用和能放 `.bss` 是两个独立性质**，SRAM3 满足前者不满足后者，原因未知。
 
-于是两者都放在 SRAM2：`.data`/`.bss` 从底部起，IDLE 栈由
-`CONFIG_IDLETHREAD_STACKSIZE` 顶到 `0x28034000`，堆用剩下的到 `0x28040000`。
+于是两者都放在 SRAM2：`.data`/`.bss` 从底部起，IDLE 栈顶由
+`_ebss + CONFIG_IDLETHREAD_STACKSIZE` 算出，堆用剩下的部分。
+
+> **区间此后扩过两次，上面那两个地址已过时。** 闭源 BLE 库带来 37KB `.bss`
+> 时把 IDLE 栈顶顶出了原来的 128K 区界（PORTING_NOTES 十三章第一战），
+> 区间先扩到 192K，现为 **256K**：`ld.script` 里 `sram` = `0x28020000`
+> 起 256K，`_eram` = **`0x28060000`**，并加了一条链接期 `ASSERT` 让再撞
+> 这个坑变成构建错误而不是砖。运行时还用 `kumm_addregion()` 把 SRAM4/5
+> 并进堆，42KB → 370KB（第八章）。当前 `configs/nsh` 实测 sram 占用 67.32%。
 
 ### 时钟使能的时序依赖
 
@@ -346,7 +362,7 @@ s.connect()          # protocol: FULL, flash size: 8 MB
 
 **取证基础设施**（保留在树内，均可用 Kconfig/源码开关控制）：
 
-- `bk7258_wdt.c`：AON 看门狗常备+SysTick 喂狗；`board_reset()` 走看门狗
+- `bk7258_wdt.c`：AON 看门狗常备，喂狗跑在 AON RTC 的 oneshot 回调里（时基换成 arch_alarm 后从 SysTick 迁过去的，见 `bk7258_rtc.c:855`）；`board_reset()` 走看门狗
   （SYSRESETREQ 在本 SoC 无效，SDK 与 bootloader 均用看门狗复位——反汇编证实）。
   注意看门狗块**不可在 `__start` 顶端写**（两块都会总线挂死），须在时钟/控制台
   就绪后武装。
@@ -552,7 +568,11 @@ bx   r6                  ; 跳到 vector[1]
 编解码另做过离线 round-trip，32KB 与 832KB 两个跨度均与原始物理字节逐字节一致。
 后来又用完整 8MB 出厂镜像做了第三次验证：120 个已写块的 CRC 与我们的编码器逐块一致。
 
-### 尚未解决
+### 尚未解决（**历史快照：两条都已结案，保留作取证记录**）
+
+> 本节写于控制台尚未通车时。**两条都已解决**：控制台自 PORTING_NOTES 一章
+> （`rd_ready` 判据 + 监控线程）起长期稳定；初始 SP 之谜随链接脚本区间扩到
+> 256K、并补上链接期 `ASSERT` 一并收口（十三章第一战）。下文保留原样。
 
 `__start()` 已能完整跑完（7 个检查点全部到达），`nx_start()` 已进入，但之后没有任何
 控制台输出。同时初始 SP 的规律尚未闭合：只有 `0x2803c800` 能跑通，链接脚本自然产生
