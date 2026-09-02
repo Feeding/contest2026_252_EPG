@@ -972,15 +972,20 @@ static uint8_t phy_osi_wifi_media_mode(void)
  *   A radio with no detect threshold scans happily and reports
  *   "recv frame is zero" on every one.
  *
- *   The real installer is bk_phy_set_nv_reg_hook() in libwifi.a, already
- *   linked.
+ *   The real installer is bk_phy_set_nv_reg_hook(), which lives in libwifi.a.
+ *   Only the WiFi configs link that archive, so the call is gated the same
+ *   way as the one in bk7258_phy_adapter_init(); without the gate the nsh
+ *   config fails to link, which it did from 5ad4798 until this gate was
+ *   added.
  *
  ****************************************************************************/
 
 static void phy_osi_nv_reg_set_hook(void *hook)
 {
   g_phy_nv_reg_hook = hook;
+#ifdef CONFIG_BK7258_WIFI_VENDOR
   bk_phy_set_nv_reg_hook(hook);
+#endif
 }
 
 /****************************************************************************
